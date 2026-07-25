@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AstroRoute - Astro-Weather Location Comparison</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>AstroRoute</h1>
+    <p class="tagline">Find the best reflection window based on your mood, the sky, and the weather.</p>
+  </header>
+
+  <main>
+    <section class="form-section">
+      <h2>Compare Locations</h2>
+      <form id="compare-form">
+        <div class="field">
+          <label for="moodScore">Your current mood activation (0 = very low, 10 = very high)</label>
+          <input type="range" id="moodScore" min="0" max="10" step="1" value="5">
+          <output id="moodScoreOutput">5 (neutral)</output>
+        </div>
+
+        <fieldset class="candidates-fieldset">
+          <legend>Candidate cities (2-3)</legend>
+          <div id="candidates-container"></div>
+          <button type="button" id="add-city">+ Add city</button>
+        </fieldset>
+
+        <button type="submit" id="submit-btn">Compare</button>
+      </form>
+    </section>
+
+    <section class="results-section" id="results" hidden>
+      <h2>Result</h2>
+      <div id="result-content"></div>
+    </section>
+
+    <section class="disclaimer-section">
+      <p><small>Reflective practice only. Not medical, financial, legal, or predictive advice.</small></p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
