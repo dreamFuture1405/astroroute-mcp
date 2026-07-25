@@ -1,0 +1,21 @@
+{
+  "name": "astroroute",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-07-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./public"
+  },
+  "vars": {
+    "PROVIDER_ASTROLOGY": "freeastrologyapi.com",
+    "PROVIDER_WEATHER": "open-meteo.com",
+    "SCORING_VERSION": "score-v1"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // Secret FREE_ASTROLOGY_API_KEY is set via:
+  //   npx wrangler secret put FREE_ASTROLOGY_API_KEY
+  // Do NOT commit the secret value to this file.
+}
