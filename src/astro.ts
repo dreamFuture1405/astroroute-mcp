@@ -63,6 +63,47 @@ export function getUtcOffsetMinutes(date: Date, timezone: string): number {
   }
 }
 
+// Safe normalization for boolean isRetro.
+// true only for boolean true, "true", or "True". false for everything else.
+function normalizeIsRetro(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === "string") {
+    const v = value.trim();
+    if (v === "true" || v === "True") return true;
+  }
+  return false;
+}
+
+// Safe normalization for planet name from item.name, item.planet.en, item.planet.
+function normalizePlanetName(item: any): string {
+  if (typeof item?.name === "string" && item.name.length > 0) return item.name;
+  if (item?.planet && typeof item.planet.en === "string" && item.planet.en.length > 0) {
+    return item.planet.en;
+  }
+  if (typeof item?.planet === "string" && item.planet.length > 0) return item.planet;
+  return "Unknown";
+}
+
+// Safe normalization for zodiac sign from item.zodiacSignName, item.zodiacSign, item.sign, item.zodiac_sign.name.en.
+function normalizeZodiacSign(item: any): string {
+  if (typeof item?.zodiacSignName === "string" && item.zodiacSignName.length > 0) {
+    return item.zodiacSignName;
+  }
+  if (typeof item?.zodiacSign === "string" && item.zodiacSign.length > 0) {
+    return item.zodiacSign;
+  }
+  if (typeof item?.sign === "string" && item.sign.length > 0) return item.sign;
+  if (
+    item?.zodiac_sign &&
+    item.zodiac_sign.name &&
+    typeof item.zodiac_sign.name.en === "string" &&
+    item.zodiac_sign.name.en.length > 0
+  ) {
+    return item.zodiac_sign.name.en;
+  }
+  return "Aries";
+}
+
 export async function fetchWesternSkyProfile(
   apiKey: string,
   asOfUtc: string,
@@ -106,21 +147,47 @@ export async function fetchWesternSkyProfile(
   }
 
   const data: any = await response.json();
-  const rawPlanets: any[] = Array.isArray(data?.output)
-    ? data.output
-    : Array.isArray(data?.planets)
-    ? data.planets
-    : [];
 
-  const planets: Planet[] = rawPlanets.map((item) => {
-    const name = String(item.name ?? item.planet ?? "Unknown");
+  // Safe-error context: top-level keys only (no upstream body leak).
+  const topLevelKeys: string[] =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? Object.keys(data)
+      : Array.isArray(data)
+        ? ["<root array>"]
+        : [];
+
+  // Accept planet arrays from: root, output, data, result, planets.
+  const rawPlanets: any[] | null = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.output)
+      ? data.output
+      : Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data?.result)
+          ? data.result
+          : Array.isArray(data?.planets)
+            ? data.planets
+            : null;
+
+  if (rawPlanets === null) {
+    throw new Error(
+      `Free Astrology API responded ${response.status} with top-level keys: ${topLevelKeys.join(", ")}`
+    );
+  }
+
+  const planets: Planet[] = rawPlanets.map((item: any) => {
+    const name = normalizePlanetName(item);
     const fullDegree = Number(item.fullDegree ?? item.degree ?? 0);
     const normDegree = Number(item.normDegree ?? ((fullDegree % 30 + 30) % 30));
-    const isRetro = Boolean(item.isRetro ?? item.retrograde ?? false);
-    const zodiacSign = String(item.zodiacSign ?? item.sign ?? "Aries");
+    const isRetro = normalizeIsRetro(item.isRetro ?? item.retrograde);
+    const zodiacSign = normalizeZodiacSign(item);
     const element = inferElement(zodiacSign);
     return { name, fullDegree, normDegree, isRetro, zodiacSign, element };
   });
+
+  if (planets.length === 0) {
+    throw new Error(`Free Astrology API responded ${response.status} but returned 0 planets`);
+  }
 
   const counts = { fire: 0, earth: 0, air: 0, water: 0 };
   for (const p of planets) counts[p.element]++;
