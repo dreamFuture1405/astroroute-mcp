@@ -16,10 +16,36 @@
     <section class="form-section">
       <h2>Compare Locations</h2>
       <form id="compare-form">
-        <div class="field">
-          <label for="moodScore">Your current mood activation (0 = very low, 10 = very high)</label>
-          <input type="range" id="moodScore" min="0" max="10" step="1" value="5">
-          <output id="moodScoreOutput">5 (neutral)</output>
+        <fieldset class="mood-section">
+          <legend>Your current mood</legend>
+          <p class="mood-hint">Rate each axis from 0 (very low) to 10 (very high).</p>
+          <div class="mood-grid">
+            <div class="mood-control">
+              <label for="moodEnergy">Energy (0 = drained, 10 = energized)</label>
+              <input type="range" id="moodEnergy" min="0" max="10" step="1" value="5">
+              <output id="moodEnergyOutput">5</output>
+            </div>
+            <div class="mood-control">
+              <label for="moodStress">Stress (0 = calm, 10 = very tense)</label>
+              <input type="range" id="moodStress" min="0" max="10" step="1" value="5">
+              <output id="moodStressOutput">5</output>
+            </div>
+            <div class="mood-control">
+              <label for="moodFocus">Focus (0 = scattered, 10 = sharp)</label>
+              <input type="range" id="moodFocus" min="0" max="10" step="1" value="5">
+              <output id="moodFocusOutput">5</output>
+            </div>
+            <div class="mood-control">
+              <label for="moodSocialBattery">Social battery (0 = depleted, 10 = full)</label>
+              <input type="range" id="moodSocialBattery" min="0" max="10" step="1" value="5">
+              <output id="moodSocialBatteryOutput">5</output>
+            </div>
+          </div>
+        </fieldset>
+
+        <div class="checkbox-label">
+          <input type="checkbox" id="includePlaceContext">
+          <label for="includePlaceContext">Include Wikimedia place context (opt-in, loaded only when checked)</label>
         </div>
 
         <fieldset class="candidates-fieldset">
@@ -35,6 +61,11 @@
     <section class="results-section" id="results" hidden>
       <h2>Result</h2>
       <div id="result-content"></div>
+    </section>
+
+    <section class="place-context-section" id="place-context-section" hidden>
+      <h2>Place context</h2>
+      <div id="place-context-content"></div>
     </section>
 
     <section class="disclaimer-section">
