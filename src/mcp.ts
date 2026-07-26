@@ -19,7 +19,7 @@ const CityShape = {
   timezone: z.string().min(1).describe("IANA timezone identifier, e.g. Asia/Ho_Chi_Minh"),
 };
 
-export function createAstroRouteMcpServer(): McpServer {
+export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: string }): McpServer {
   const server = new McpServer({
     name: "astroroute",
     version: "0.1.0",
@@ -43,9 +43,9 @@ export function createAstroRouteMcpServer(): McpServer {
           "Reference location for the sky profile (any one of your candidate cities works)."
         ),
     },
-    async (args, env) => {
+    async (args) => {
       const asOfUtc = args.asOfUtc ?? new Date().toISOString();
-      const apiKey = (env as any)?.FREE_ASTROLOGY_API_KEY;
+      const apiKey = env?.FREE_ASTROLOGY_API_KEY;
       if (!apiKey) {
         return {
           content: [{ type: "text", text: "Server is missing FREE_ASTROLOGY_API_KEY." }],
@@ -93,7 +93,7 @@ export function createAstroRouteMcpServer(): McpServer {
         .describe("Candidate cities to compare."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
     },
-    async (args, env) => {
+    async (args) => {
       const validation = validateCompareInput(args);
       if (!validation.ok) {
         return {
