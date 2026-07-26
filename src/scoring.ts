@@ -140,7 +140,6 @@ function elementWeatherAlignment(
 }
 
 // Find the most "reflective" 1-hour window in the next 24 hours.
-// Reflective = comfortable temperature, no precipitation, moderate wind, mild clouds, ideally daylight.
 function bestReflectionWindow(w: Weather): {
   startLocal: string;
   endLocal: string;
@@ -198,7 +197,6 @@ function scoreHourlySlot(
   let elementScore = 50;
   let weatherScore = 50;
 
-  // Element-weather alignment (simplified from elementWeatherAlignment)
   for (const elem of dominantElements) {
     if (elem === "fire") {
       if (h.isDay) { elementScore += 15; astroReasons.push("Fire: daylight"); }
@@ -219,14 +217,12 @@ function scoreHourlySlot(
     }
   }
 
-  // Weather quality
   if (h.temperature >= 15 && h.temperature <= 25) { weatherScore += 15; weatherReasons.push(`Comfortable temp ${h.temperature}C`); }
   if (h.precipitation === 0) { weatherScore += 15; weatherReasons.push("No precipitation"); }
   if (h.cloudCover >= 20 && h.cloudCover <= 70) { weatherScore += 10; weatherReasons.push(`Partly cloudy ${h.cloudCover}%`); }
   if (h.windSpeed >= 3 && h.windSpeed <= 20) { weatherScore += 10; weatherReasons.push(`Moderate wind ${h.windSpeed}km/h`); }
   if (h.isDay) { weatherScore += 5; weatherReasons.push("Daylight"); }
 
-  // Mood match
   const wActivation = clamp(Math.round(
     (h.temperature >= 15 && h.temperature <= 25 ? 7 : 4) * 0.30 +
     (h.isDay ? 7 : 3) * 0.20 +
@@ -287,21 +283,19 @@ export async function compareLocations(
   const asOfUtc = input.asOfUtc ?? new Date().toISOString();
   const referenceCity = input.candidates[0];
 
-  // Geocentric: one astrology call shared across all cities in this comparison.
   const skyProfile: WesternSkyProfile = await fetchWesternSkyProfile(
     env.FREE_ASTROLOGY_API_KEY,
     asOfUtc,
     referenceCity
   );
 
-  // Weather in parallel.
   const weathers: Weather[] = await Promise.all(
     input.candidates.map((c) => fetchLocationWeather(c))
   );
 
   const ranked: RankedLocation[] = weathers.map((w, idx) => {
     const wActivation = weatherActivation(w);
-    const mismatch = Math.round(Math.abs(input.moodScore - wActivation) * 10); // 0-100
+    const mismatch = Math.round(Math.abs(input.moodScore - wActivation) * 10);
     const align = elementWeatherAlignment(skyProfile.dominantElements, w);
     const window = bestReflectionWindow(w);
 
@@ -334,7 +328,6 @@ export async function compareLocations(
     };
   });
 
-  // Sort: higher fit wins; tie-break on lower mismatch, then earlier window start, then input order.
   ranked.sort((a, b) => {
     if (b.astroWeatherFitScore !== a.astroWeatherFitScore) {
       return b.astroWeatherFitScore - a.astroWeatherFitScore;
@@ -400,7 +393,6 @@ export async function explainLocationScore(
 }> {
   const asOfUtc = input.asOfUtc ?? new Date().toISOString();
 
-  // Validate targetLocationName matches exactly one candidate
   const matches = input.candidates.filter((c) => c.name === input.targetLocationName);
   if (matches.length !== 1) {
     throw new Error(
@@ -410,7 +402,6 @@ export async function explainLocationScore(
     );
   }
 
-  // Run comparison once
   const result = await compareLocations(env, input);
   const target = result.rankedLocations.find((r) => r.location.name === input.targetLocationName);
   if (!target) throw new Error("Internal error: target location not found in ranked results.");
@@ -490,27 +481,22 @@ export async function findReflectionWindow(
   const asOfUtc = input.asOfUtc ?? new Date().toISOString();
   const windowHoursAhead = clamp(input.windowHoursAhead ?? 24, 3, 24);
 
-  // Fetch sky profile and weather
   const skyProfile = await fetchWesternSkyProfile(env.FREE_ASTROLOGY_API_KEY, asOfUtc, input.location);
   const weather = await fetchLocationWeather(input.location);
 
-  // Limit hourly slots to windowHoursAhead
   const hourlySlice = weather.hourly.slice(0, windowHoursAhead);
 
-  // Score each hourly slot
   const slotResults = hourlySlice.map((h, idx) => ({
     idx,
     ...scoreHourlySlot(h, skyProfile.dominantElements, input.moodScore),
     time: h.time,
   }));
 
-  // Best 1-hour: highest quality single slot
   const best1HourIdx = slotResults.reduce((best, cur, idx) =>
     cur.qualityScore > slotResults[best].qualityScore ? idx : best, 0);
   const best1HourSlot = slotResults[best1HourIdx];
   const best1HourEnd = hourlySlice[Math.min(best1HourIdx + 1, hourlySlice.length - 1)];
 
-  // Best 3-hour: highest mean of 3 consecutive slots
   let best3HourStartIdx = 0;
   let best3HourMean = -1;
   for (let i = 0; i <= slotResults.length - 3; i++) {
@@ -522,7 +508,6 @@ export async function findReflectionWindow(
   }
   const best3HourEnd = hourlySlice[Math.min(best3HourStartIdx + 2, hourlySlice.length - 1)];
 
-  // Fallback logic
   const threshold = 65;
   const bothBelowThreshold = best1HourSlot.qualityScore < threshold && best3HourMean < threshold;
   const fallbackUsed = bothBelowThreshold;
@@ -536,6 +521,10 @@ export async function findReflectionWindow(
     : skyProfile.planets[0]?.zodiacSign
     ? `${skyProfile.planets[0].name} in ${skyProfile.planets[0].zodiacSign}`
     : "Unknown";
+
+  const slot1 = slotResults[best3HourStartIdx];
+  const slot2 = slotResults[best3HourStartIdx + 1];
+  const slot3 = slotResults[best3HourStartIdx + 2];
 
   return {
     methodVersion: "reflection-window-v1",
@@ -553,27 +542,27 @@ export async function findReflectionWindow(
       moodReason: best1HourSlot.moodReason,
     },
     best3Hours: {
-      startLocal: slotResults[best3HourStartIdx].time,
+      startLocal: slot1.time,
       endLocal: best3HourEnd.time,
       timezone: input.location.timezone,
       qualityScore: best3HourMean,
       weatherReasons: [
-        ...slotResults[best3HourStartIdx].weatherReasons,
-        ...slotResults[best3HourStartIdx + 1]?.weatherReasons,
-        ...slotResults[best3HourStartIdx + 2]?.weatherReasons,
-      ].filter(Boolean),
+        ...slot1.weatherReasons,
+        ...(slot2 ? slot2.weatherReasons : []),
+        ...(slot3 ? slot3.weatherReasons : []),
+      ],
       astroReasons: [
-        ...slotResults[best3HourStartIdx].astroReasons,
-        ...slotResults[best3HourStartIdx + 1]?.astroReasons,
-        ...slotResults[best3HourStartIdx + 2]?.astroReasons,
-      ].filter(Boolean),
+        ...slot1.astroReasons,
+        ...(slot2 ? slot2.astroReasons : []),
+        ...(slot3 ? slot3.astroReasons : []),
+      ],
       moodReason: best1HourSlot.moodReason,
     },
     fallback: {
       used: fallbackUsed,
       threshold,
       reason: fallbackUsed
-        ? `Both best 1-hour (${best1HourSlot.qualityScore}/100) and best 3-hour (${best3HourMean}/100) are below threshold ${threshold}. Returned best available windows.`
+        ? "Both best 1-hour (" + best1HourSlot.qualityScore + "/100) and best 3-hour (" + best3HourMean + "/100) are below threshold " + threshold + ". Returned best available windows."
         : null,
       returnedBestAvailable: fallbackUsed,
     },
@@ -590,7 +579,7 @@ export async function findReflectionWindow(
       },
     },
     caveats: [
-      `reflection-window-v1 uses a threshold of ${threshold} as a design assumption.",
+      "reflection-window-v1 uses a threshold of " + threshold + " as a design assumption.",
       "Three-hour quality is the rounded mean of three consecutive hourly scores.",
       "Weather data is current and may change; window times are local to the requested location.",
     ],
@@ -626,19 +615,18 @@ export async function generateAgentBrief(
   const result = await compareLocations(env, input);
   const first = result.rankedLocations[0];
 
-  // Build avoidIfConditions from live-weather-change, high mismatch, precipitation, strong wind, weak-window
   const avoidIfConditions: string[] = [];
   if (first.moodWeatherMismatch > 50) {
     avoidIfConditions.push("High mood-weather mismatch (>50): activation level may not match outdoor conditions.");
   }
   if (first.weatherEvidence.precipitation > 0) {
-    avoidIfConditions.push(`Precipitation detected (${first.weatherEvidence.precipitation}mm): conditions may change.`);
+    avoidIfConditions.push("Precipitation detected (" + first.weatherEvidence.precipitation + "mm): conditions may change.");
   }
   if (first.weatherEvidence.windSpeed > 30) {
-    avoidIfConditions.push(`Strong wind (${first.weatherEvidence.windSpeed}km/h): may affect outdoor plans.`);
+    avoidIfConditions.push("Strong wind (" + first.weatherEvidence.windSpeed + "km/h): may affect outdoor plans.");
   }
   if (first.bestReflectionWindow.quality < 65) {
-    avoidIfConditions.push(`Best window quality below 65 (${first.bestReflectionWindow.quality}/100): no strong reflection window available.`);
+    avoidIfConditions.push("Best window quality below 65 (" + first.bestReflectionWindow.quality + "/100): no strong reflection window available.");
   }
   if (!first.weatherEvidence.isDay) {
     avoidIfConditions.push("Nighttime at recommended location: daytime may be more activating.");
