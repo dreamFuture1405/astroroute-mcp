@@ -1,162 +1,206 @@
-# AstroRoute Local Validation Checklist (v2)
+# AstroRoute v0.3 Release Validation Checklist
 
-This checklist covers pre-deploy and post-deploy gates **without automated tests** (per the Step 2 simplification directive). Each gate must pass by hand before the next.
+This checklist covers static review, local smoke checks, legacy regression, v0.3 behavior, MCP protocol behavior, security, and release evidence. Execute gates in order. Do not proceed after a failed live test.
 
-## G0 Static checks
+## Scope and invariants
 
-- [ ] `npm install` completes without errors
-- [ ] `npx tsc --noEmit` reports 0 errors
-- [ ] Source files contain no `FREE_ASTROLOGY_API_KEY` literal value
-- [ ] `public/` files contain no `x-goog-api-key`, `AIza`, or any key literal
-- [ ] `wrangler.jsonc` has `assets.directory` pointing to `./public`
-- [ ] Exactly 13 files in the repo (matching the locked file list)
+- Worker version is `0.3.0`.
+- No new external API, dependency, Worker route, or secret is permitted in this UI and documentation update.
+- Wikimedia is the existing keyless third provider implemented in `src/place.ts`.
+- Requests without `moodProfile` and `includePlaceContext` must retain `methodVersion: "score-v1"`, the legacy core response fields, and the legacy formula.
+- Rich requests with `moodProfile` or `includePlaceContext` must use `methodVersion: "score-v3"` and expose the documented rich metadata.
+- The exact safety disclaimer is: `Reflective practice only. Not medical, financial, legal, or predictive advice.`
+- The exact MCP tool set is: `get_western_sky_profile`, `get_location_weather`, `compare_astro_weather_locations`, `get_agent_test_fixture`, `explain_score_components`, `find_reflection_window`, `generate_agent_brief`, `get_place_context`. Tool order is not a contract.
 
-## G1 Local dev (`npx wrangler dev`)
+## G0 Repository and static checks
 
-- [ ] Worker boots without errors
-- [ ] `GET http://localhost:8787/healthz` returns 200 with `{"status":"ok","service":"astroroute","scoring":"score-v1"}`
-- [ ] `GET http://localhost:8787/` returns 200 with the HTML form
-- [ ] `GET http://localhost:8787/agents-guide.md` returns 200 with markdown
-- [ ] `GET http://localhost:8787/styles.css` returns 200
-- [ ] `GET http://localhost:8787/app.js` returns 200
-- [ ] `POST http://localhost:8787/api/compare` with `{}` returns 400 with field-level errors mentioning moodScore/candidates
-- [ ] `POST http://localhost:8787/api/compare` with a valid 3-city body (moodScore 5, Hanoi/Tokyo/Singapore) returns 200 with a `ComparisonResult`
+- [ ] `npm install` completes without errors.
+- [ ] `npx tsc --noEmit` reports zero errors.
+- [ ] Source files contain no literal value for `FREE_ASTROLOGY_API_KEY`.
+- [ ] `public/` contains no API key, `AIza`, `x-api-key`, or `x-goog-api-key` value.
+- [ ] `public/app.js` contains only a relative `fetch("/api/compare")` call and no provider URL.
+- [ ] Free Astrology API endpoint appears only in the server-side astrology adapter.
+- [ ] Open-Meteo endpoint appears only in the server-side weather adapter.
+- [ ] Wikimedia calls appear only in `src/place.ts`.
+- [ ] `wrangler.jsonc` still points Static Assets at `./public`.
+- [ ] The repository has 14 core implementation and documentation files plus the pre-existing `test_connection_check.txt` file.
+- [ ] The v0.3 UI and documentation update added no file and deleted no file.
+- [ ] No unimplemented scoring label appears in source, docs, tests, or UI.
 
-## G2 MCP endpoint (existing 4 tools)
+## G1 Local smoke checks
 
-- [ ] `POST http://localhost:8787/mcp` with `initialize` returns 200 with `serverInfo.name === "astroroute"` and `serverInfo.version === "0.2.0"`
-- [ ] `POST http://localhost:8787/mcp` with `tools/list` returns exactly **7 tools** with strict JSON Schema (`additionalProperties: false`)
-- [ ] `POST http://localhost:8787/mcp` with `tools/call` for `get_agent_test_fixture` (fixtureId `three_city_live_v1`) returns the fixture JSON including the `sevenTools` array
-- [ ] `POST http://localhost:8787/mcp` with `tools/call` for `get_western_sky_profile` (any reference location, default `asOfUtc`) returns a `WesternSkyProfile`
-- [ ] `POST http://localhost:8787/mcp` with `tools/call` for `get_location_weather` (Hanoi) returns a `Weather`
-- [ ] `POST http://localhost:8787/mcp` with `tools/call` for `compare_astro_weather_locations` (moodScore 5, Hanoi/Tokyo/Singapore) returns a `ComparisonResult`
-- [ ] Two concurrent MCP sessions do not see each other's responses (stateless)
+Run with `npx wrangler dev` when a local Worker environment is available.
 
-## G3 MCP endpoint (new 3 tools)
+- [ ] Worker starts without a boot error.
+- [ ] `GET /healthz` returns HTTP 200 and includes `status: "ok"`, `service: "astroroute"`, `scoring: "score-v1-or-score-v3"`, and `version: "0.3.0"`.
+- [ ] `GET /` returns HTTP 200 and contains the four mood slider controls, candidate form, opt-in place-context checkbox, and exact disclaimer.
+- [ ] `GET /agents-guide.md` returns HTTP 200 and documents all eight tools.
+- [ ] `POST /api/compare` with `{}` returns HTTP 400 with sanitized validation details.
 
-### Tool 5: explain_score_components (valid)
+## G2 Legacy REST regression
 
-- [ ] Input: `{ moodScore: 5, candidates: [Hanoi, Tokyo, Singapore], targetLocationName: "Tokyo" }`
-- [ ] Returns `methodVersion: "score-v1"`, `targetLocation.rank`, `targetLocation.location`, `targetLocation.astroWeatherFitScore`
-- [ ] Returns `scoreBreakdown.element.rawScore`, `.weight` (0.45), `.weightedContribution`
-- [ ] Returns `scoreBreakdown.moodMatch.moodWeatherMismatch`, `.inverseScore`, `.weight` (0.35), `.weightedContribution`
-- [ ] Returns `scoreBreakdown.window.rawScore`, `.weight` (0.20), `.weightedContribution`
-- [ ] `scoreBreakdown.recomputedTotal` equals `round(0.45 * element + 0.35 * mismatchInverse + 0.20 * window)` and matches `astroWeatherFitScore`
-- [ ] Returns `elementWeatherAlignment.score` and `elementWeatherAlignment.explanation[]` non-empty
-- [ ] Returns `bestWindowReasoning.startLocal`, `.endLocal`, `.quality`, `.reason`
-- [ ] Returns `caveats[]` with 3 entries and `disclaimer` exact string
-- [ ] `targetLocationName` matches exactly one candidate name
+Use two or three full City objects and omit both optional rich fields.
 
-### Tool 5: explain_score_components (invalid - zero match)
+- [ ] `POST /api/compare` returns HTTP 200.
+- [ ] Response has `ok: true` and `methodVersion: "score-v1"`.
+- [ ] Response includes `moodInterpretation`, `skyProfile`, `rankedLocations`, `whyFirstPlace`, `dataFreshness`, and `disclaimer`.
+- [ ] Every ranked location includes the legacy score fields, window fields, weather evidence, and score components.
+- [ ] `astroWeatherFitScore` equals the documented score-v1 composition for the returned components.
+- [ ] No place context request is made when `includePlaceContext` is absent.
+- [ ] No credential appears in the response body or headers.
 
-- [ ] Input: `{ moodScore: 5, candidates: [Hanoi, Tokyo], targetLocationName: "Mars" }`
-- [ ] Returns MCP `isError: true` with message mentioning no match and listing candidate names
-- [ ] No provider call made (error before `compareLocations`)
+## G3 Rich REST and UI checks
 
-### Tool 5: explain_score_components (invalid - ambiguous)
+Use `moodScore`, two or three full City objects, a four-axis `moodProfile`, and `includePlaceContext: true`.
 
-- [ ] Input: `{ moodScore: 5, candidates: ["Tokyo", "Tokyo"], targetLocationName: "Tokyo" }` (if validation allows duplicate names)
-- [ ] Returns MCP `isError: true` with message mentioning multiple matches
+- [ ] `POST /api/compare` returns HTTP 200 with `ok: true`.
+- [ ] Response has `methodVersion: "score-v3"`.
+- [ ] Response includes `derivedMoodProfile`, `placeContextList`, `moodProfileFit`, and `scoreV3Weights`.
+- [ ] Each ranked location has a `v3` object containing `moodFitScore`, `placeFitScore`, `placeContext`, `finalScoreV3`, and `weights`.
+- [ ] `finalScoreV3` values are in the range 0 to 100.
+- [ ] `placeContextList` entries contain sanitized Wikimedia fields and no raw upstream body.
+- [ ] With `includePlaceContext: false` and a supplied mood profile, the response remains score-v3 but does not fetch place context.
+- [ ] The UI sends `moodScore` equal to the energy slider and sends all four mood axes.
+- [ ] The UI renders the score method, derived mood profile, score weights, final score, place tags, evidence terms, confidence, and fallback state when supplied.
+- [ ] Two-city and three-city UI flows render without console errors.
+- [ ] The UI browser network shows only same-origin `/api/compare`.
+- [ ] The UI displays the exact disclaimer.
 
-### Tool 6: find_reflection_window (valid)
+## G4 Exact ordered production test suite
 
-- [ ] Input: `{ location: Tokyo full City object, moodScore: 5, windowHoursAhead: 24 }`
-- [ ] Returns `methodVersion: "reflection-window-v1"`
-- [ ] Returns `best1Hour.startLocal`, `.endLocal`, `.timezone`, `.qualityScore` (0-100), `.weatherReasons[]`, `.astroReasons[]`, `.moodReason`
-- [ ] Returns `best3Hours.startLocal`, `.endLocal`, `.timezone`, `.qualityScore` (0-100), `.weatherReasons[]`, `.astroReasons[]`, `.moodReason`
-- [ ] `best1Hour` and `best3Hours` use consecutive hourly array indices
-- [ ] `best3Hours.qualityScore` equals the rounded mean of three consecutive hourly scores
-- [ ] `fallback.used` is exactly `true` if and only if both best scores < 65
-- [ ] Returns `sourceRecords.astrology.provider`, `.endpointFamily`, `.fetchedAtUtc`
-- [ ] Returns `sourceRecords.weather.provider`, `.fetchedAtUtc`, `.horizonHours`
-- [ ] Returns `caveats[]` and `disclaimer` exact string
+Run these 15 tests in this order against the deployed Worker. Record the HTTP status and a concise response summary for each.
 
-### Tool 6: find_reflection_window (validation errors)
+1. **GET `/healthz`**
+   - [ ] HTTP 200.
+   - [ ] `version` is `0.3.0`.
+   - [ ] `scoring` is `score-v1-or-score-v3`.
 
-- [ ] Input: `{ location: Tokyo, moodScore: 11, ... }` - schema error, no provider call
-- [ ] Input: `{ location: Tokyo, moodScore: 5, windowHoursAhead: 2 }` - schema error (min 3), no provider call
-- [ ] Input: `{ location: Tokyo, moodScore: 5, windowHoursAhead: 25 }` - schema error (max 24), no provider call
+2. **GET `/`**
+   - [ ] HTTP 200.
+   - [ ] HTML contains four mood sliders, candidate inputs, the place-context checkbox, and the disclaimer.
 
-### Tool 7: generate_agent_brief (valid)
+3. **GET `/agents-guide.md`**
+   - [ ] HTTP 200.
+   - [ ] Markdown documents the exact eight-tool set, mood profile, place context, and score versions.
 
-- [ ] Input: `{ moodScore: 5, candidates: [Hanoi, Tokyo, Singapore] }`
-- [ ] Returns `schemaVersion: "agent-brief-v1"`, `methodVersion: "score-v1"`
-- [ ] Returns `recommendedCity` as full City object matching `rankedLocations[0].location` from a comparison with same inputs
-- [ ] Returns `bestTime.startLocal`, `.endLocal`, `.timezone`, `.qualityScore` matching rank-1 `bestReflectionWindow`
-- [ ] Returns `why` as non-empty string referencing `recommendedCity.name`
-- [ ] Returns `avoidIfConditions[]` as array of strings (may be empty if conditions are mild)
-- [ ] Returns `sourceRecords.astrology` with `provider`, `endpointFamily`, `asOfUtc`, `dominantElements[]`, `keyPlanet`
-- [ ] Returns `sourceRecords.weather[]` with entries for each candidate: `provider`, `location`, `weatherEvidence`
-- [ ] Returns `disclaimer` exact string
+4. **POST `/api/compare` legacy**
+   - [ ] Valid legacy body returns HTTP 200 and `methodVersion: "score-v1"`.
+   - [ ] Ranked locations and legacy score fields are present.
 
-### Tool 7: generate_agent_brief (invalid input)
+5. **POST `/api/compare` rich**
+   - [ ] Valid body with `moodProfile` and `includePlaceContext: true` returns HTTP 200 and `methodVersion: "score-v3"`.
+   - [ ] `derivedMoodProfile`, `placeContextList`, `rankedLocations[].v3`, and `scoreV3Weights` are present.
 
-- [ ] Input: `{ moodScore: 5 }` (missing candidates) - returns `isError: true` with validation error
-- [ ] Input: `{ moodScore: 11, candidates: [...] }` - returns `isError: true`
+6. **MCP initialize**
+   - [ ] JSON-RPC initialize returns HTTP 200.
+   - [ ] `serverInfo.name` is `astroroute`.
+   - [ ] `serverInfo.version` is `0.3.0`.
+   - [ ] Protocol version and capabilities are present.
 
-## G4 Provider contracts
+7. **MCP `tools/list`**
+   - [ ] HTTP 200.
+   - [ ] The returned set is exactly the eight names listed in the invariants section.
+   - [ ] The check ignores order and rejects missing or extra tools.
 
-- [ ] Free Astrology API responds 200 with `output[].name` and `output[].zodiacSign` populated for `observation_point: "geocentric"`, `ayanamsha: "tropical"`, `language: "en"`
-- [ ] Open-Meteo responds 200 with `current`, `hourly.time` length 24, `daily.sunrise[0]`, `daily.sunset[0]`
-- [ ] Provider 401 → response error code `upstream_unavailable` with sanitized message (no upstream body leaked)
-- [ ] Provider 429 → response error code `upstream_unavailable` with `retryable: true`
-- [ ] Provider timeout (artificial 5s sleep) → response error code `upstream_unavailable` with `retryable: true`
+8. **MCP `get_western_sky_profile`**
+   - [ ] Valid City input returns HTTP 200 and `isError: false`.
+   - [ ] `planets` is non-empty, with element balance and dominant elements.
+   - [ ] Provider and fetch timestamp are present.
+   - [ ] No API key, authorization value, or raw upstream body appears.
 
-## G5 Same-site UI
+9. **MCP `get_location_weather`**
+   - [ ] Valid City input returns HTTP 200 and `isError: false`.
+   - [ ] `current`, 24 hourly records, sunrise, sunset, provider, and timestamp are present.
+   - [ ] No credentials appear.
 
-- [ ] `/`, `/agents-guide.md`, `/healthz`, `/api/compare`, `/mcp` all on the same origin (no mixed content)
-- [ ] Flow 2-city (Hanoi + Tokyo) renders ranked result without console errors
-- [ ] Flow 3-city (Hanoi + Tokyo + Singapore) renders ranked result without console errors
-- [ ] Result page does NOT contain horoscope, ritual, affirmation, or predictive language
-- [ ] Result page contains the disclaimer verbatim: "Reflective practice only. Not medical, financial, legal, or predictive advice."
+10. **MCP `get_place_context`**
+    - [ ] Valid city input returns HTTP 200 and `isError: false` when Wikimedia resolves the city.
+    - [ ] Response contains `provider: "wikimedia.org"`, resolved title, bounded description or extract, tags, evidence terms, confidence tier, fallback object, disclaimers, and fetch timestamp.
+    - [ ] Each tag contains `tag`, `evidence`, and `confidence`.
+    - [ ] A city with no result or a simulated upstream failure returns a sanitized `fallback.used: true` state rather than raw upstream content.
 
-## G6 Security
+11. **MCP `compare_astro_weather_locations` rich**
+    - [ ] Valid full City objects, mood profile, and `includePlaceContext: true` return HTTP 200 and `isError: false`.
+    - [ ] The response uses score-v3 and includes place context plus mood metadata.
+    - [ ] Ranking invariants hold: ranks are unique, scores are bounded, and the first rank is 1.
+    - [ ] The exact disclaimer is present.
 
-- [ ] Worker secret `FREE_ASTROLOGY_API_KEY` is set via `wrangler secret put`
-- [ ] `curl -X POST https://<worker>/api/compare -d '{...valid body...}'` does NOT include the secret in any field
-- [ ] Browser DevTools Network tab shows only same-origin `fetch('/api/compare', ...)`
-- [ ] Source files (`src/*.ts`, `public/*`) contain no API key, no token, no AIza prefix, no `x-goog-api-key` literal
-- [ ] Build output (`dist/` or bundle) contains no secret value
+12. **MCP `explain_score_components`**
+    - [ ] Valid full comparison input plus a unique `targetLocationName` returns HTTP 200 and `isError: false`.
+    - [ ] Element, mood-match, and window weights are present with 0.45, 0.35, and 0.20.
+    - [ ] `recomputedTotal` matches the selected location score.
+    - [ ] A target name that matches no candidate returns an MCP error before provider work.
+    - [ ] Duplicate candidate names produce an ambiguous-target error if submitted.
 
-## G7 Capacity (Free plan)
+13. **MCP `find_reflection_window`**
+    - [ ] Valid City, mood score, and `windowHoursAhead` from 3 through 24 return HTTP 200.
+    - [ ] `best1Hour` and `best3Hours` contain local times, timezone, bounded quality scores, weather reasons, astro reasons, and mood reason.
+    - [ ] `fallback.threshold` is 65 and fallback state is explicit.
+    - [ ] `sourceRecords`, caveats, and exact disclaimer are present.
+    - [ ] Horizons below 3 or above 24 produce validation errors without provider work.
+    - [ ] No birth data or natal-chart endpoint is required.
 
-- [ ] `wrangler tail` shows no Workers CPU limit errors during 10 fixture calls
-- [ ] p95 latency for one `compare_astro_weather_locations` call is under 5 seconds
-- [ ] p95 latency for one `find_reflection_window` call is under 5 seconds
-- [ ] p95 latency for one `generate_agent_brief` call is under 5 seconds
-- [ ] Free Astrology API quota not exceeded (50/day, 1/sec) during the test runs
+14. **MCP `generate_agent_brief`**
+    - [ ] Full comparison input returns HTTP 200 and `isError: false`.
+    - [ ] `schemaVersion` is `agent-brief-v1` and `methodVersion` is `score-v1`.
+    - [ ] `recommendedCity`, `bestTime`, `why`, `avoidIfConditions`, source records, and disclaimer are present.
+    - [ ] Missing candidates or an out-of-range mood score returns a validation error.
 
-## G8 Human Steward MCP test
+15. **Secret scan**
+    - [ ] Scan repository source and public assets.
+    - [ ] Scan all response bodies from tests 1 through 14.
+    - [ ] Scan response headers for API keys, bearer values, authorization values, `x-api-key`, and `x-goog-api-key`.
+    - [ ] Confirm no secret value or raw upstream body is exposed.
 
-- [ ] Human Steward opens an MCP client (Claude Desktop, MCP Inspector, or `curl` with manual JSON-RPC envelopes)
-- [ ] Initialize → `tools/list` returns 7 tools
-- [ ] Calls `get_agent_test_fixture` (fixtureId `three_city_live_v1`) and confirms fixture loads with `sevenTools` array
-- [ ] Calls `compare_astro_weather_locations` with moodScore 5 and Hanoi/Tokyo/Singapore
-- [ ] Calls `explain_score_components` with the same inputs plus `targetLocationName: "Tokyo"`
-- [ ] Calls `find_reflection_window` with Tokyo location and moodScore 7
-- [ ] Calls `generate_agent_brief` with moodScore 5 and Hanoi/Tokyo/Singapore
-- [ ] Saves timestamp + result JSON for the submission evidence
+## G5 Fixture and provider checks
 
-## G9 Independent other-Mind MCP test
+- [ ] `get_agent_test_fixture` accepts `three_city_live_v1`, `validation_errors_v1`, and `v0_3_wikimedia_tokyo`.
+- [ ] The fixture's `tools` array contains all eight tool names.
+- [ ] Live scores are treated as dynamic. Do not assert a historical city order as a fixed invariant.
+- [ ] Free Astrology API provider errors are sanitized.
+- [ ] Open-Meteo provider errors are sanitized.
+- [ ] Wikimedia timeout, malformed response, no-result, and non-200 behavior produces a bounded fallback state.
 
-- [ ] Another Mind connects to the public `/mcp` endpoint using its own MCP client
-- [ ] `tools/list` returns the 7 tools
-- [ ] Calls `get_agent_test_fixture` then `compare_astro_weather_locations`
-- [ ] Calls `explain_score_components` for the top-ranked city
-- [ ] Calls `find_reflection_window` for the top-ranked city
-- [ ] Calls `generate_agent_brief`
-- [ ] Reports observed fields and any errors to the steward
+## G6 Documentation and repository parity
 
-## G10 Documentation parity
+- [ ] Tool names in `src/mcp.ts`, `public/agents-guide.md`, `README.md`, and fixture responses match exactly as a set.
+- [ ] `README.md` describes the 14 core files and notes the pre-existing `test_connection_check.txt` file.
+- [ ] `public/agents-guide.md` describes the actual PlaceContext fields and tag taxonomy.
+- [ ] `test-plan.md` contains no stale tool count or health response.
+- [ ] No new file was created and no existing file was deleted by this patch.
 
-- [ ] Tool-name set in `src/mcp.ts`, `public/agents-guide.md`, `README.md`, and fixture response all contain the same 7 names
-- [ ] No tool name appears in one doc but not the others
-- [ ] `README.md` file list says exactly 13 files
-- [ ] Actual file count is exactly 13
+## G7 Human and independent Mind evidence
 
-## G11 Submission readiness
+- [ ] The Human Steward runs the ordered production suite and saves timestamped result summaries.
+- [ ] An independent other Mind uses its own MCP client against the public endpoint.
+- [ ] The independent client verifies initialize, tools/list, one legacy comparison, one rich comparison, and get_place_context.
+- [ ] The independent report records observed fields and errors without receiving an application secret.
 
-- [ ] All G0-G10 gates pass
-- [ ] Live URL captured
-- [ ] Independent MCP test result captured
-- [ ] Steward approves explicitly before any submission to the tournament
+## G8 Stop and report rule
+
+If any live test fails:
+
+1. Stop immediately at the first failing test.
+2. Do not patch, redeploy, retry destructively, or submit.
+3. Report the exact HTTP status, response body, relevant headers, test number, and timestamp.
+4. Wait for explicit steward approval before changing code or running a new deployment.
+
+Suggested failure report:
+
+```text
+Test number:
+Endpoint or tool:
+HTTP status:
+Response body summary:
+Relevant headers:
+Observed failure:
+No patch or retry performed: yes
+```
+
+## G9 Release readiness
+
+- [ ] G0 through G8 are complete.
+- [ ] Production URL and version are recorded.
+- [ ] Human and independent Mind evidence are recorded.
+- [ ] Secret scan is clean.
+- [ ] Steward gives explicit approval before any tournament submission.
