@@ -1,6 +1,9 @@
 // MCP server factory.
-// Uses the @modelcontextprotocol/sdk McpServer class to expose 7 tools via Streamable HTTP at /mcp.
+// Uses the @modelcontextprotocol/sdk McpServer class to expose 8 tools via Streamable HTTP at /mcp.
 // Stateless: src/index.ts creates a fresh server per request.
+// v0.2 -> v0.3: Tool 3 schema accepts optional moodProfile + includePlaceContext (route to score-v3).
+// Tool 8 (get_place_context) added; remaining 7 tools unchanged in name + required fields.
+// Version string bumped to "0.3.0".
 
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,9 +14,14 @@ import {
   explainLocationScore,
   findReflectionWindow,
   generateAgentBrief,
+  MoodProfileSchema,
+  CompareInputV3Schema,
+  compareLocationsV3,
+  validateCompareInputV3,
 } from "./scoring";
 import { fetchWesternSkyProfile } from "./astro";
 import { fetchLocationWeather } from "./weather";
+import { fetchPlaceContext } from "./place";
 
 const CityShape = {
   name: z.string().min(1).max(80),
@@ -22,29 +30,26 @@ const CityShape = {
   timezone: z.string().min(1).describe("IANA timezone identifier, e.g. Asia/Ho_Chi_Minh"),
 };
 
+const MoodAxesShape = {
+  energy: z.number().min(0).max(10).optional().describe("Self-reported energy level: 0 = depleted, 10 = very high."),
+  stress: z.number().min(0).max(10).optional().describe("Self-reported stress level: 0 = none, 10 = very high."),
+  focus: z.number().min(0).max(10).optional().describe("Self-reported focus/clarity: 0 = scattered, 10 = razor-sharp."),
+  socialBattery: z.number().min(0).max(10).optional().describe("Self-reported social energy: 0 = hermit, 10 = peak sociability."),
+};
+
 export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: string }): McpServer {
   const server = new McpServer({
     name: "astroroute",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   // --- Tool 1: get_western_sky_profile ---
   server.tool(
     "get_western_sky_profile",
-    "Fetch the current Western astrological sky profile (geocentric, tropical, English). " +
-      "Geocentric means the same profile applies to all candidate cities in a comparison; " +
-      "pass any one of your candidates as the referenceLocation.",
+    "Fetch the current Western astrological sky profile (geocentric, tropical, English). Geocentric means the same profile applies to all candidate cities in a comparison; pass any one of your candidates as the referenceLocation.",
     {
-      asOfUtc: z
-        .string()
-        .datetime()
-        .optional()
-        .describe("ISO 8601 UTC timestamp. Defaults to current time if omitted."),
-      referenceLocation: z
-        .object(CityShape)
-        .describe(
-          "Reference location for the sky profile (any one of your candidate cities works)."
-        ),
+      asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to current time if omitted."),
+      referenceLocation: z.object(CityShape).describe("Reference location for the sky profile (any one of your candidate cities works)."),
     },
     async (args) => {
       const asOfUtc = args.asOfUtc ?? new Date().toISOString();
@@ -82,29 +87,40 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 3: compare_astro_weather_locations (main entry) ---
   server.tool(
     "compare_astro_weather_locations",
-    "Compare 2-3 candidate cities and recommend the best reflection window. Inputs are mood activation (0 = very low, 10 = very high) and 2-3 cities. Returns ranked locations with astroWeatherFitScore, moodWeatherMismatch, elementWeatherAlignment, bestReflectionWindow, whyFirstPlace, and a safety disclaimer.",
+    "Compare 2-3 candidate cities and recommend the best reflection window. Required inputs: moodScore (0-10) and 2-3 candidates. Optional v0.3 fields: moodProfile (energy, stress, focus, socialBattery; each 0-10) and includePlaceContext (boolean). When v0.3 fields are absent the response uses score-v1 (preserved exactly from v0.2). When present, the response uses score-v3 with weighted base/mood/place components. Returns ranked locations with astroWeatherFitScore, moodWeatherMismatch, elementWeatherAlignment, bestReflectionWindow, whyFirstPlace, derivedMoodProfile (when v0.3), placeContextList (when includePlaceContext), and a safety disclaimer.",
     {
-      moodScore: z
-        .number()
-        .min(0)
-        .max(10)
-        .describe("Self-reported mood activation: 0 = very low/quiet energy, 10 = very high/activated energy."),
-      candidates: z
-        .array(z.object(CityShape))
-        .min(2)
-        .max(3)
-        .describe("Candidate cities to compare."),
+      moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low/quiet energy, 10 = very high/activated energy."),
+      candidates: z.array(z.object(CityShape)).min(2).max(3).describe("Candidate cities to compare."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
+      moodProfile: MoodProfileSchema.optional().describe("Optional v0.3 four-axis mood profile; defaults are derived from moodScore when omitted."),
+      includePlaceContext: z.boolean().optional().describe("Optional v0.3: when true, fetch per-candidate Wikimedia place context to combine with mood profile for score-v3."),
     },
     async (args) => {
-      const validation = validateCompareInput(args);
-      if (!validation.ok) {
+      const v3Validation = validateCompareInputV3(args);
+      if (!v3Validation.ok) {
         return {
-          content: [{ type: "text", text: `Invalid input: ${validation.error}` }],
+          content: [{ type: "text", text: `Invalid input: ${v3Validation.error}` }],
           isError: true,
         };
       }
-      const result = await compareLocations(env as any, validation.value);
+      const moodProfileActive =
+        args.moodProfile !== undefined && Object.keys(args.moodProfile).length > 0;
+      const placeContextActive = args.includePlaceContext === true;
+      if (!moodProfileActive && !placeContextActive) {
+        const v1Validation = validateCompareInput(v3Validation.value);
+        if (!v1Validation.ok) {
+          return {
+            content: [{ type: "text", text: `Invalid input: ${v1Validation.error}` }],
+            isError: true,
+          };
+        }
+        const result = await compareLocations(env as any, v1Validation.value);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+        };
+      }
+      const result = await compareLocationsV3(env as any, v3Validation.value);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         structuredContent: result,
@@ -118,7 +134,7 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
     "Return a fixed test fixture (deterministic input + expected schema/assertions) for verifying MCP behavior. Weather scores will not match exactly because live weather changes, but the schema and ranking invariants hold.",
     {
       fixtureId: z
-        .enum(["three_city_live_v1", "validation_errors_v1"])
+        .enum(["three_city_live_v1", "validation_errors_v1", "v0_3_wikimedia_tokyo"])
         .optional()
         .default("three_city_live_v1"),
     },
@@ -139,7 +155,8 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
           expectedSchema: {
             methodVersion: "score-v1",
             asOfUtc: "ISO 8601 string equal to inputs.asOfUtc",
-            moodInterpretation: "{ score: number, label: 'neutral' | 'very low' | 'low' | 'elevated' | 'high' }",
+            moodInterpretation:
+              "{ score: number, label: 'neutral' | 'very low' | 'low' | 'elevated' | 'high' }",
             skyProfile:
               "{ dominantElements: array of 1-2 Element strings, keyPlanet: string }",
             rankedLocations:
@@ -157,7 +174,7 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             "rankedLocations sorted by astroWeatherFitScore descending",
             "disclaimer exactly matches the safety string",
           ],
-          sevenTools: [
+          tools: [
             "get_western_sky_profile",
             "get_location_weather",
             "compare_astro_weather_locations",
@@ -165,7 +182,9 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             "explain_score_components",
             "find_reflection_window",
             "generate_agent_brief",
+            "get_place_context",
           ],
+          version: "0.3.0",
         },
         validation_errors_v1: {
           description:
@@ -200,6 +219,45 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             },
           ],
         },
+        v0_3_wikimedia_tokyo: {
+          description:
+            "v0.3 schema: includePlaceContext + partial moodProfile. Use to verify get_place_context and score-v3 path.",
+          inputs: {
+            moodScore: 6,
+            candidates: [
+              { name: "Tokyo", latitude: 35.6762, longitude: 139.6503, timezone: "Asia/Tokyo" },
+              { name: "Reykjavik", latitude: 64.1466, longitude: -21.9426, timezone: "Atlantic/Reykjavik" },
+            ],
+            asOfUtc: "2026-07-26T12:00:00Z",
+            moodProfile: { energy: 7, focus: 6 },
+            includePlaceContext: true,
+          },
+          expectedSchema: {
+            methodVersion: "score-v3",
+            derivedMoodProfile: "object with all four axes 0-10 (defaults filled from moodScore)",
+            placeContextList: "array of length 2, each entry provider is 'wikimedia.org'",
+            rankedLocations:
+              "array; each entry has v3.moodFitScore (number|null), v3.placeFitScore (number|null), v3.placeContext (object|null), v3.finalScoreV3 (0-100), v3.weights ({base,mood,place})",
+            scoreV3Weights: "{ base: 0.7, mood: 0.2, place: 0.1 }",
+          },
+          invariants: [
+            "rankedLocations[0].v3.finalScoreV3 in [0, 100]",
+            "sum of v3.weights == 1.0",
+            "methodVersion == 'score-v3'",
+            "placeContextList[*].provider == 'wikimedia.org'",
+          ],
+          tools: [
+            "get_western_sky_profile",
+            "get_location_weather",
+            "compare_astro_weather_locations",
+            "get_agent_test_fixture",
+            "explain_score_components",
+            "find_reflection_window",
+            "generate_agent_brief",
+            "get_place_context",
+          ],
+          version: "0.3.0",
+        },
       };
 
       const fixture = fixtures[args.fixtureId];
@@ -213,24 +271,12 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 5: explain_score_components ---
   server.tool(
     "explain_score_components",
-    "Explain why one selected candidate received its score after a comparison. Takes the full compare request plus a targetLocationName that must match exactly one candidate name. Returns the score breakdown with weighted contributions, element alignment, and caveats.",
+    "Explain why one selected candidate received its score after a comparison. Takes the full compare request plus a targetLocationName that must match exactly one candidate name. Returns the score breakdown with weighted contributions, element alignment, and caveats. (v0.2 score-v1 path; for v0.3 explanations, use compare_astro_weather_locations with v0.3 fields and inspect the v3 block.)",
     {
-      moodScore: z
-        .number()
-        .min(0)
-        .max(10)
-        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
-      candidates: z
-        .array(z.object(CityShape))
-        .min(2)
-        .max(3)
-        .describe("Candidate cities (must include the targetLocationName)."),
+      moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      candidates: z.array(z.object(CityShape)).min(2).max(3).describe("Candidate cities (must include the targetLocationName)."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
-      targetLocationName: z
-        .string()
-        .min(1)
-        .max(80)
-        .describe("Exact name of the candidate to explain. Must match one candidate.name exactly."),
+      targetLocationName: z.string().min(1).max(80).describe("Exact name of the candidate to explain. Must match one candidate.name exactly."),
     },
     async (args) => {
       const validation = validateCompareInput({
@@ -265,24 +311,12 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 6: find_reflection_window ---
   server.tool(
     "find_reflection_window",
-    "Find the best 1-hour and 3-hour reflection windows for a single location. Uses the existing Western sky snapshot and Open-Meteo forecast. Birth profile interpretation: geocentric tropical Western sky for asOfUtc at the concrete location. No birth data required.",
+    "Find the best 1-hour and 3-hour reflection windows for a single location. Uses the existing Western sky snapshot and Open-Meteo forecast. (v0.2 reflection-window-v1 path.)",
     {
-      location: z
-        .object(CityShape)
-        .describe("Concrete location with name, latitude, longitude, and timezone."),
-      moodScore: z
-        .number()
-        .min(0)
-        .max(10)
-        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      location: z.object(CityShape).describe("Concrete location with name, latitude, longitude, and timezone."),
+      moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low, 10 = very high."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
-      windowHoursAhead: z
-        .number()
-        .int()
-        .min(3)
-        .max(24)
-        .optional()
-        .describe("How many hours ahead to search. Default 24, max 24 (matches Open-Meteo forecast horizon)."),
+      windowHoursAhead: z.number().int().min(3).max(24).optional().describe("How many hours ahead to search. Default 24, max 24 (matches Open-Meteo forecast horizon)."),
     },
     async (args) => {
       try {
@@ -308,18 +342,10 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 7: generate_agent_brief ---
   server.tool(
     "generate_agent_brief",
-    "Convert a full comparison into compact JSON another agent can consume without parsing the full ranked payload. Returns recommended city, best time window, reasoning, avoid-if conditions, and source records.",
+    "Convert a full comparison into compact JSON another agent can consume without parsing the full ranked payload. Returns recommended city, best time window, reasoning, avoid-if conditions, and source records. (v0.2 agent-brief-v1 schema; uses score-v1 path.)",
     {
-      moodScore: z
-        .number()
-        .min(0)
-        .max(10)
-        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
-      candidates: z
-        .array(z.object(CityShape))
-        .min(2)
-        .max(3)
-        .describe("Candidate cities to compare."),
+      moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      candidates: z.array(z.object(CityShape)).min(2).max(3).describe("Candidate cities to compare."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
     },
     async (args) => {
@@ -335,6 +361,29 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           structuredContent: result,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${e.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool 8: get_place_context (v0.3) ---
+  server.tool(
+    "get_place_context",
+    "Fetch keyless Wikimedia context for a single city: resolved Wikipedia title, description, extract snippet, optional coordinates, and a derived 8-tag taxonomy (coastal, urban_dense, historic, green_space, creative, quiet, nightlife, transit_hub). Each tag carries matched evidence terms and a confidence tier (high/medium/low). Returns a sanitized unavailable state with fallback.reason when Wikimedia cannot be reached or the city cannot be resolved.",
+    {
+      city: z.object(CityShape).describe("City with name, latitude, longitude, timezone. Name is used for Wikimedia resolution."),
+    },
+    async (args) => {
+      try {
+        const ctx = await fetchPlaceContext(args.city);
+        return {
+          content: [{ type: "text", text: JSON.stringify(ctx, null, 2) }],
+          structuredContent: ctx,
         };
       } catch (e: any) {
         return {
