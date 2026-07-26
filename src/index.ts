@@ -55,7 +55,7 @@ export default {
 
     // MCP endpoint (Streamable HTTP). Stateless: new server + transport per request.
     if (url.pathname === "/mcp" || url.pathname === "/mcp/") {
-      const server = createAstroRouteMcpServer();
+      const server = createAstroRouteMcpServer(env);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
