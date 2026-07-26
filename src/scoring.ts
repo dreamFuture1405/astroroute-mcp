@@ -3,6 +3,14 @@
 //   - the dominant elements of the sky profile (from src/astro.ts)
 //   - current + 24-hour weather at each candidate location (from src/weather.ts)
 //   - the user's self-reported mood activation (0 = very low, 10 = very high)
+//
+// v0.3 (added at end of file) extends this with:
+//   - MoodProfileSchema (optional 4-axis mood: energy, stress, focus, socialBattery)
+//   - PlaceContext import from src/place.ts
+//   - CompareInputV3Schema and compareLocationsV3 orchestrator
+//   - RankedLocationV3 extension and ComparisonResultV3 type
+//   - score-v3 = weighted combination of score-v1 + moodFit + placeFit
+//   - If neither v0.3 field is present, score-v1 path is preserved exactly
 
 import { z } from "zod";
 import type { Element, WesternSkyProfile } from "./astro";
@@ -63,7 +71,6 @@ function clamp(n: number, min: number, max: number): number {
 export function weatherActivation(w: Weather): number {
   const c = w.current;
 
-  // Comfort temperature (apparent). 18-24 ideal, 12-28 OK, else low.
   const tempScore =
     c.apparentTemperature >= 18 && c.apparentTemperature <= 24
       ? 10
@@ -71,18 +78,14 @@ export function weatherActivation(w: Weather): number {
       ? 7
       : 4;
 
-  // Daylight adds activation; night is calmer.
   const dayScore = c.isDay ? 7 : 3;
 
-  // Wind: light-to-moderate energizes; very strong exhausts.
   const windScore =
     c.windSpeed <= 5 ? 6 : c.windSpeed <= 20 ? 10 : c.windSpeed <= 40 ? 6 : 3;
 
-  // Clouds: partly cloudy is the most engaging band.
   const cloudScore =
     c.cloudCover <= 25 ? 9 : c.cloudCover <= 60 ? 10 : c.cloudCover <= 85 ? 6 : 4;
 
-  // Any precipitation lowers activation.
   const precipScore = c.precipitation === 0 ? 10 : c.precipitation < 1 ? 7 : 3;
 
   return Math.round(
@@ -95,7 +98,6 @@ export function weatherActivation(w: Weather): number {
 }
 
 // 0-100 alignment score: how well the dominant sky elements "match" current weather.
-// Each element contributes additive bonuses grounded in observable signals.
 function elementWeatherAlignment(
   dominantElements: Element[],
   w: Weather
@@ -470,7 +472,7 @@ export async function findReflectionWindow(
     astroReasons: string[];
     moodReason: string;
   };
-  fallback: { used: boolean; threshold: 65; reason: string | null; returnedBestAvailable: boolean };
+  fallback: { used: boolean; threshold: number; reason: string | null; returnedBestAvailable: boolean };
   sourceRecords: {
     astrology: { provider: string; endpointFamily: string; fetchedAtUtc: string };
     weather: { provider: string; fetchedAtUtc: string; horizonHours: number };
@@ -660,5 +662,214 @@ export async function generateAgentBrief(
       })),
     },
     disclaimer: result.disclaimer,
+  };
+}
+
+// =============================================================================
+// v0.3 additions: MoodProfile, CompareInputV3, score-v3 path
+// =============================================================================
+
+import type { PlaceContext, PlaceTag } from "./place";
+import { fetchPlaceContext, PLACE_MOOD_COMPATIBILITY } from "./place";
+
+export const MoodProfileSchema = z
+  .object({
+    energy: z.number().min(0).max(10).optional(),
+    stress: z.number().min(0).max(10).optional(),
+    focus: z.number().min(0).max(10).optional(),
+    socialBattery: z.number().min(0).max(10).optional(),
+  })
+  .strict();
+
+export type MoodProfile = z.infer<typeof MoodProfileSchema>;
+
+export const CompareInputV3Schema = z.object({
+  moodScore: z.number().min(0).max(10),
+  candidates: z.array(CitySchema).min(2).max(3),
+  asOfUtc: z.string().datetime().optional(),
+  moodProfile: MoodProfileSchema.optional(),
+  includePlaceContext: z.boolean().optional(),
+});
+
+export type CompareInputV3 = z.infer<typeof CompareInputV3Schema>;
+
+export interface RankedLocationV3 {
+  moodFitScore: number | null;
+  placeFitScore: number | null;
+  placeContext: PlaceContext | null;
+  finalScoreV3: number;
+  weights: { base: number; mood: number; place: number } | null;
+}
+
+export type ComparisonResultV3 = Omit<ComparisonResult, "methodVersion" | "rankedLocations"> & {
+  methodVersion: "score-v1" | "score-v3";
+  rankedLocations: Array<RankedLocation & { v3: RankedLocationV3 | null }>;
+  derivedMoodProfile: MoodProfile | null;
+  placeContextList: PlaceContext[] | null;
+  moodProfileFit: number | null;
+  scoreV3Weights: { base: number; mood: number; place: number };
+};
+
+export function deriveDefaultMoodProfile(moodScore: number): Required<MoodProfile> {
+  const m = Math.max(0, Math.min(10, moodScore));
+  if (m <= 2) return { energy: 2, stress: 8, focus: 3, socialBattery: 2 };
+  if (m <= 4) return { energy: 4, stress: 6, focus: 4, socialBattery: 4 };
+  if (m <= 6) return { energy: 5, stress: 5, focus: 5, socialBattery: 5 };
+  if (m <= 8) return { energy: 7, stress: 4, focus: 6, socialBattery: 7 };
+  return { energy: 9, stress: 2, focus: 8, socialBattery: 8 };
+}
+
+function clamp01to100(n: number): number {
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function computePlaceFit(profile: Required<MoodProfile>, tags: PlaceTag[]): number {
+  if (tags.length === 0) return 50;
+  let totalDelta = 0;
+  let count = 0;
+  const axes: Array<"energy" | "stress" | "focus" | "socialBattery"> = [
+    "energy",
+    "stress",
+    "focus",
+    "socialBattery",
+  ];
+  for (const tag of tags) {
+    const compat = PLACE_MOOD_COMPATIBILITY[tag.tag];
+    for (const axis of axes) {
+      const delta = compat[axis] ?? 0;
+      if (delta === 0) continue;
+      const centerTarget = axis === "stress" ? 5 - profile[axis] : profile[axis] - 5;
+      totalDelta += centerTarget * delta;
+      count += 1;
+    }
+  }
+  if (count === 0) return 50;
+  const normalized = 50 + (totalDelta / Math.max(1, count)) * 6;
+  return clamp01to100(normalized);
+}
+
+function resolveMoodProfile(
+  input: CompareInputV3
+): { profile: Required<MoodProfile>; provided: boolean } {
+  const p = input.moodProfile;
+  const provided = !!p && Object.keys(p).length > 0;
+  const base = deriveDefaultMoodProfile(input.moodScore);
+  if (!provided) return { profile: base, provided: false };
+  return {
+    profile: {
+      energy: Math.max(0, Math.min(10, p!.energy ?? base.energy)),
+      stress: Math.max(0, Math.min(10, p!.stress ?? base.stress)),
+      focus: Math.max(0, Math.min(10, p!.focus ?? base.focus)),
+      socialBattery: Math.max(0, Math.min(10, p!.socialBattery ?? base.socialBattery)),
+    },
+    provided: true,
+  };
+}
+
+function computeMoodFitFromProfile(profile: Required<MoodProfile>): number {
+  const sumDelta =
+    Math.abs(profile.energy - 5) +
+    Math.abs(profile.stress - 5) +
+    Math.abs(profile.focus - 5) +
+    Math.abs(profile.socialBattery - 5);
+  return clamp01to100(100 - sumDelta * 5);
+}
+
+export function validateCompareInputV3(
+  body: unknown
+): { ok: true; value: CompareInputV3 } | { ok: false; error: string } {
+  const result = CompareInputV3Schema.safeParse(body);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
+      .join("; ");
+    return { ok: false, error: issues };
+  }
+  return { ok: true, value: result.data };
+}
+
+export async function compareLocationsV3(
+  env: { FREE_ASTROLOGY_API_KEY: string },
+  input: CompareInputV3
+): Promise<ComparisonResultV3> {
+  const v1Input: CompareInput = {
+    moodScore: input.moodScore,
+    candidates: input.candidates,
+    asOfUtc: input.asOfUtc,
+  };
+  const base = await compareLocations(env, v1Input);
+
+  const placeRequested = input.includePlaceContext === true;
+  const { profile: moodProfile, provided: moodProvided } = resolveMoodProfile(input);
+
+  let placeContexts: PlaceContext[] | null = null;
+  if (placeRequested) {
+    placeContexts = await Promise.all(
+      input.candidates.map((c) => fetchPlaceContext(c))
+    );
+  }
+
+  const moodActive = moodProvided;
+  const placeActive = placeRequested;
+
+  if (!moodActive && !placeActive) {
+    return {
+      ...base,
+      methodVersion: "score-v1",
+      rankedLocations: base.rankedLocations.map((r) => ({ ...r, v3: null })),
+      derivedMoodProfile: null,
+      placeContextList: null,
+      moodProfileFit: null,
+      scoreV3Weights: { base: 1, mood: 0, place: 0 },
+    };
+  }
+
+  const wMood = moodActive ? 0.20 : 0;
+  const wPlace = placeActive ? 0.10 : 0;
+  const wBase = Math.round((1 - wMood - wPlace) * 100) / 100;
+  const moodFit = moodActive ? computeMoodFitFromProfile(moodProfile) : null;
+
+  const ranked = base.rankedLocations.map(
+    (r, idx): RankedLocation & { v3: RankedLocationV3 | null } => {
+      const placeContext = placeContexts ? placeContexts[idx] : null;
+      const placeFit = placeContext ? computePlaceFit(moodProfile, placeContext.tags) : null;
+      const m = moodFit ?? 50;
+      const p = placeFit ?? 50;
+      const finalScoreV3 = clamp01to100(
+        wBase * r.astroWeatherFitScore + wMood * m + wPlace * p
+      );
+      return {
+        ...r,
+        v3: {
+          moodFitScore: moodFit,
+          placeFitScore: placeFit,
+          placeContext,
+          finalScoreV3,
+          weights: { base: wBase, mood: wMood, place: wPlace },
+        },
+      };
+    }
+  );
+
+  ranked.sort((a, b) => {
+    const ba = b.v3?.finalScoreV3 ?? b.astroWeatherFitScore;
+    const aa = a.v3?.finalScoreV3 ?? a.astroWeatherFitScore;
+    if (ba !== aa) return ba - aa;
+    return a.moodWeatherMismatch - b.moodWeatherMismatch;
+  });
+  ranked.forEach((r, i) => (r.rank = i + 1));
+
+  const first = ranked[0];
+  const whyFirstPlace = `Score-v3 ranked ${first.location.name} first using weights base=${wBase}, mood=${wMood}, place=${wPlace} with finalScoreV3=${first.v3?.finalScoreV3 ?? first.astroWeatherFitScore}/100. Mood-weather mismatch is ${first.moodWeatherMismatch}/100. Best reflection window starts at ${first.bestReflectionWindow.startLocal} with quality ${first.bestReflectionWindow.quality}/100.`;
+
+  return {
+    ...base,
+    methodVersion: "score-v3",
+    rankedLocations: ranked,
+    derivedMoodProfile: moodProfile,
+    placeContextList: placeContexts,
+    moodProfileFit: moodFit,
+    scoreV3Weights: { base: wBase, mood: wMood, place: wPlace },
+    whyFirstPlace,
   };
 }
