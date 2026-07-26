@@ -1,9 +1,9 @@
 // MCP server factory.
-// Uses the Cloudflare agents/mcp library to expose 4 tools via Streamable HTTP at /mcp.
+// Uses the @modelcontextprotocol/sdk McpServer class to expose 4 tools via Streamable HTTP at /mcp.
 // Stateless: src/index.ts creates a fresh server per request.
 
 import { z } from "zod";
-import { McpServer } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   CompareInputSchema,
   compareLocations,
@@ -25,7 +25,7 @@ export function createAstroRouteMcpServer(): McpServer {
     version: "0.1.0",
   });
 
-  // ---- Tool 1: get_western_sky_profile ----
+  // --- Tool 1: get_western_sky_profile ---
   server.tool(
     "get_western_sky_profile",
     "Fetch the current Western astrological sky profile (geocentric, tropical, English). " +
@@ -60,7 +60,7 @@ export function createAstroRouteMcpServer(): McpServer {
     }
   );
 
-  // ---- Tool 2: get_location_weather ----
+  // --- Tool 2: get_location_weather ---
   server.tool(
     "get_location_weather",
     "Fetch current weather, 24-hour hourly forecast, and sunrise/sunset for a single city from Open-Meteo. No API key required.",
@@ -76,13 +76,10 @@ export function createAstroRouteMcpServer(): McpServer {
     }
   );
 
-  // ---- Tool 3: compare_astro_weather_locations (main entry) ----
+  // --- Tool 3: compare_astro_weather_locations (main entry) ---
   server.tool(
     "compare_astro_weather_locations",
-    "Compare 2-3 candidate cities and recommend the best reflection window. " +
-      "Inputs are mood activation (0 = very low, 10 = very high) and 2-3 cities. " +
-      "Returns ranked locations with astroWeatherFitScore, moodWeatherMismatch, elementWeatherAlignment, " +
-      "bestReflectionWindow, whyFirstPlace, and a safety disclaimer.",
+    "Compare 2-3 candidate cities and recommend the best reflection window. Inputs are mood activation (0 = very low, 10 = very high) and 2-3 cities. Returns ranked locations with astroWeatherFitScore, moodWeatherMismatch, elementWeatherAlignment, bestReflectionWindow, whyFirstPlace, and a safety disclaimer.",
     {
       moodScore: z
         .number()
@@ -112,11 +109,10 @@ export function createAstroRouteMcpServer(): McpServer {
     }
   );
 
-  // ---- Tool 4: get_agent_test_fixture ----
+  // --- Tool 4: get_agent_test_fixture ---
   server.tool(
     "get_agent_test_fixture",
-    "Return a fixed test fixture (deterministic input + expected schema/invariant assertions) for verifying MCP behavior. " +
-      "Weather scores will not match exactly because live weather changes, but the schema and ranking invariants do hold.",
+    "Return a fixed test fixture (deterministic input + expected schema/assertions) for verifying MCP behavior. Weather scores will not match exactly because live weather changes, but the schema and ranking invariants hold.",
     {
       fixtureId: z
         .enum(["three_city_live_v1", "validation_errors_v1"])
@@ -138,7 +134,7 @@ export function createAstroRouteMcpServer(): McpServer {
             asOfUtc: "2026-07-25T12:00:00Z",
           },
           expectedSchema: {
-            methodVersion: '"score-v1"',
+            methodVersion: "score-v1",
             asOfUtc: "ISO 8601 string equal to inputs.asOfUtc",
             moodInterpretation: "{ score: number, label: 'neutral' | 'very low' | 'low' | 'elevated' | 'high' }",
             skyProfile:
@@ -148,10 +144,10 @@ export function createAstroRouteMcpServer(): McpServer {
             whyFirstPlace: "non-empty string referencing rankedLocations[0].location.name",
             dataFreshness: "non-empty string",
             disclaimer:
-              '"Reflective practice only. Not medical, financial, legal, or predictive advice."',
+              "'Reflective practice only. Not medical, financial, legal, or predictive advice.'",
           },
           invariants: [
-            "rankedLocations[0].rank === 1",
+            "rankedLocations[0].rank == 1",
             "rankedLocations has no duplicate ranks",
             "astroWeatherFitScore in [0, 100] for every entry",
             "moodWeatherMismatch in [0, 100] for every entry",
@@ -170,7 +166,9 @@ export function createAstroRouteMcpServer(): McpServer {
             {
               input: {
                 moodScore: -1,
-                candidates: [{ name: "X", latitude: 0, longitude: 0, timezone: "UTC" }],
+                candidates: [
+                  { name: "X", latitude: 0, longitude: 0, timezone: "UTC" },
+                ],
               },
               expectedError: "invalid_input: moodScore must be >= 0 and candidates must have 2-3 entries",
             },
