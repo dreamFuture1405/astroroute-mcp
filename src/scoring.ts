@@ -187,6 +187,66 @@ function bestReflectionWindow(w: Weather): {
   };
 }
 
+// Score a single hourly slot using the same three factor families as score-v1.
+function scoreHourlySlot(
+  h: WeatherHourly,
+  dominantElements: Element[],
+  moodScore: number
+): { qualityScore: number; weatherReasons: string[]; astroReasons: string[]; moodReason: string } {
+  const weatherReasons: string[] = [];
+  const astroReasons: string[] = [];
+  let elementScore = 50;
+  let weatherScore = 50;
+
+  // Element-weather alignment (simplified from elementWeatherAlignment)
+  for (const elem of dominantElements) {
+    if (elem === "fire") {
+      if (h.isDay) { elementScore += 15; astroReasons.push("Fire: daylight"); }
+      else { elementScore -= 10; astroReasons.push("Fire: nighttime"); }
+      if (h.temperature >= 20) { elementScore += 10; astroReasons.push("Fire: warm"); }
+      else { elementScore -= 5; }
+      if (h.cloudCover <= 40) { elementScore += 10; astroReasons.push("Fire: open sky"); }
+      else { elementScore -= 10; }
+    } else if (elem === "water") {
+      if (h.humidity >= 60) { elementScore += 10; astroReasons.push("Water: humid"); }
+      if (h.cloudCover >= 40) { elementScore += 10; }
+    } else if (elem === "air") {
+      if (h.windSpeed >= 5 && h.windSpeed <= 25) { elementScore += 12; astroReasons.push("Air: moderate wind"); }
+      if (h.cloudCover <= 70) { elementScore += 6; }
+    } else if (elem === "earth") {
+      if (h.windSpeed <= 15) { elementScore += 12; astroReasons.push("Earth: stable wind"); }
+      if (h.temperature >= 10 && h.temperature <= 26) { elementScore += 10; }
+    }
+  }
+
+  // Weather quality
+  if (h.temperature >= 15 && h.temperature <= 25) { weatherScore += 15; weatherReasons.push(`Comfortable temp ${h.temperature}C`); }
+  if (h.precipitation === 0) { weatherScore += 15; weatherReasons.push("No precipitation"); }
+  if (h.cloudCover >= 20 && h.cloudCover <= 70) { weatherScore += 10; weatherReasons.push(`Partly cloudy ${h.cloudCover}%`); }
+  if (h.windSpeed >= 3 && h.windSpeed <= 20) { weatherScore += 10; weatherReasons.push(`Moderate wind ${h.windSpeed}km/h`); }
+  if (h.isDay) { weatherScore += 5; weatherReasons.push("Daylight"); }
+
+  // Mood match
+  const wActivation = clamp(Math.round(
+    (h.temperature >= 15 && h.temperature <= 25 ? 7 : 4) * 0.30 +
+    (h.isDay ? 7 : 3) * 0.20 +
+    (h.windSpeed <= 5 ? 6 : h.windSpeed <= 20 ? 10 : 6) * 0.20 +
+    (h.cloudCover <= 60 ? 10 : 6) * 0.15 +
+    (h.precipitation === 0 ? 10 : 5) * 0.15
+  ), 0, 10);
+  const mismatch = Math.round(Math.abs(moodScore - wActivation) * 10);
+  const mismatchInverse = 100 - mismatch;
+  const moodReason = `Mood activation ${moodScore}, weather activation ${wActivation}, mismatch ${mismatch}/100`;
+
+  const qualityScore = clamp(Math.round(
+    0.45 * clamp(elementScore, 0, 100) +
+    0.35 * mismatchInverse +
+    0.20 * clamp(weatherScore, 0, 100)
+  ), 0, 100);
+
+  return { qualityScore, weatherReasons, astroReasons, moodReason };
+}
+
 // ----- Public types -----
 
 export type RankedLocation = {
@@ -314,5 +374,303 @@ export async function compareLocations(
     dataFreshness: `Sky profile fetched ${skyProfile.fetchedAtUtc}; weather data current as of comparison time.`,
     disclaimer:
       "Reflective practice only. Not medical, financial, legal, or predictive advice.",
+  };
+}
+
+// ----- New helpers for MCP tools (Attempt #2) -----
+
+/** Explain why one selected candidate received its score after a comparison. */
+export async function explainLocationScore(
+  env: { FREE_ASTROLOGY_API_KEY: string },
+  input: CompareInput & { targetLocationName: string }
+): Promise<{
+  methodVersion: "score-v1";
+  asOfUtc: string;
+  targetLocation: { rank: number; location: City; astroWeatherFitScore: number };
+  scoreBreakdown: {
+    element: { rawScore: number; weight: 0.45; weightedContribution: number };
+    moodMatch: { moodWeatherMismatch: number; inverseScore: number; weight: 0.35; weightedContribution: number };
+    window: { rawScore: number; weight: 0.20; weightedContribution: number };
+    recomputedTotal: number;
+  };
+  elementWeatherAlignment: { score: number; explanation: string[] };
+  bestWindowReasoning: { startLocal: string; endLocal: string; quality: number; reason: string };
+  caveats: string[];
+  disclaimer: string;
+}> {
+  const asOfUtc = input.asOfUtc ?? new Date().toISOString();
+
+  // Validate targetLocationName matches exactly one candidate
+  const matches = input.candidates.filter((c) => c.name === input.targetLocationName);
+  if (matches.length !== 1) {
+    throw new Error(
+      matches.length === 0
+        ? `targetLocationName "${input.targetLocationName}" does not match any candidate. Candidates: ${input.candidates.map((c) => c.name).join(", ")}`
+        : `targetLocationName "${input.targetLocationName}" matches multiple candidates. Use an exact unique name.`
+    );
+  }
+
+  // Run comparison once
+  const result = await compareLocations(env, input);
+  const target = result.rankedLocations.find((r) => r.location.name === input.targetLocationName);
+  if (!target) throw new Error("Internal error: target location not found in ranked results.");
+
+  const { element, mismatchInverse, window: windowScore } = target.scoreComponents;
+  const weightedElement = Math.round(element * 0.45 * 100) / 100;
+  const weightedMood = Math.round(mismatchInverse * 0.35 * 100) / 100;
+  const weightedWindow = Math.round(windowScore * 0.20 * 100) / 100;
+  const recomputedTotal = Math.round(0.45 * element + 0.35 * mismatchInverse + 0.20 * windowScore);
+
+  return {
+    methodVersion: "score-v1",
+    asOfUtc,
+    targetLocation: {
+      rank: target.rank,
+      location: target.location,
+      astroWeatherFitScore: target.astroWeatherFitScore,
+    },
+    scoreBreakdown: {
+      element: { rawScore: element, weight: 0.45, weightedContribution: weightedElement },
+      moodMatch: { moodWeatherMismatch: target.moodWeatherMismatch, inverseScore: mismatchInverse, weight: 0.35, weightedContribution: weightedMood },
+      window: { rawScore: windowScore, weight: 0.20, weightedContribution: weightedWindow },
+      recomputedTotal,
+    },
+    elementWeatherAlignment: target.elementWeatherAlignment,
+    bestWindowReasoning: target.bestReflectionWindow,
+    caveats: [
+      "Scoring weights (0.45/0.35/0.20) are design assumptions, not validated truth.",
+      "Geocentric sky profile is shared across all cities; individual local celestial positions may vary.",
+      "Weather data is current as of the comparison timestamp and may change.",
+    ],
+    disclaimer: result.disclaimer,
+  };
+}
+
+/** Find the best 1-hour and 3-hour reflection windows for a single location. */
+export async function findReflectionWindow(
+  env: { FREE_ASTROLOGY_API_KEY: string },
+  input: {
+    location: City;
+    moodScore: number;
+    asOfUtc?: string;
+    windowHoursAhead?: number;
+  }
+): Promise<{
+  methodVersion: "reflection-window-v1";
+  asOfUtc: string;
+  location: City;
+  moodInterpretation: { score: number; label: MoodLabel };
+  skyProfile: { dominantElements: string[]; keyPlanet: string };
+  best1Hour: {
+    startLocal: string;
+    endLocal: string;
+    timezone: string;
+    qualityScore: number;
+    weatherReasons: string[];
+    astroReasons: string[];
+    moodReason: string;
+  };
+  best3Hours: {
+    startLocal: string;
+    endLocal: string;
+    timezone: string;
+    qualityScore: number;
+    weatherReasons: string[];
+    astroReasons: string[];
+    moodReason: string;
+  };
+  fallback: { used: boolean; threshold: 65; reason: string | null; returnedBestAvailable: boolean };
+  sourceRecords: {
+    astrology: { provider: string; endpointFamily: string; fetchedAtUtc: string };
+    weather: { provider: string; fetchedAtUtc: string; horizonHours: number };
+  };
+  caveats: string[];
+  disclaimer: string;
+}> {
+  const asOfUtc = input.asOfUtc ?? new Date().toISOString();
+  const windowHoursAhead = clamp(input.windowHoursAhead ?? 24, 3, 24);
+
+  // Fetch sky profile and weather
+  const skyProfile = await fetchWesternSkyProfile(env.FREE_ASTROLOGY_API_KEY, asOfUtc, input.location);
+  const weather = await fetchLocationWeather(input.location);
+
+  // Limit hourly slots to windowHoursAhead
+  const hourlySlice = weather.hourly.slice(0, windowHoursAhead);
+
+  // Score each hourly slot
+  const slotResults = hourlySlice.map((h, idx) => ({
+    idx,
+    ...scoreHourlySlot(h, skyProfile.dominantElements, input.moodScore),
+    time: h.time,
+  }));
+
+  // Best 1-hour: highest quality single slot
+  const best1HourIdx = slotResults.reduce((best, cur, idx) =>
+    cur.qualityScore > slotResults[best].qualityScore ? idx : best, 0);
+  const best1HourSlot = slotResults[best1HourIdx];
+  const best1HourEnd = hourlySlice[Math.min(best1HourIdx + 1, hourlySlice.length - 1)];
+
+  // Best 3-hour: highest mean of 3 consecutive slots
+  let best3HourStartIdx = 0;
+  let best3HourMean = -1;
+  for (let i = 0; i <= slotResults.length - 3; i++) {
+    const mean = Math.round((slotResults[i].qualityScore + slotResults[i + 1].qualityScore + slotResults[i + 2].qualityScore) / 3);
+    if (mean > best3HourMean) {
+      best3HourMean = mean;
+      best3HourStartIdx = i;
+    }
+  }
+  const best3HourEnd = hourlySlice[Math.min(best3HourStartIdx + 2, hourlySlice.length - 1)];
+
+  // Fallback logic
+  const threshold = 65;
+  const bothBelowThreshold = best1HourSlot.qualityScore < threshold && best3HourMean < threshold;
+  const fallbackUsed = bothBelowThreshold;
+
+  const sun = skyProfile.planets.find((p) => p.name.toLowerCase() === "sun");
+  const moon = skyProfile.planets.find((p) => p.name.toLowerCase() === "moon");
+  const keyPlanet = sun?.zodiacSign
+    ? `Sun in ${sun.zodiacSign}`
+    : moon?.zodiacSign
+    ? `Moon in ${moon.zodiacSign}`
+    : skyProfile.planets[0]?.zodiacSign
+    ? `${skyProfile.planets[0].name} in ${skyProfile.planets[0].zodiacSign}`
+    : "Unknown";
+
+  return {
+    methodVersion: "reflection-window-v1",
+    asOfUtc,
+    location: input.location,
+    moodInterpretation: { score: input.moodScore, label: moodLabel(input.moodScore) },
+    skyProfile: { dominantElements: skyProfile.dominantElements, keyPlanet },
+    best1Hour: {
+      startLocal: best1HourSlot.time,
+      endLocal: best1HourEnd.time,
+      timezone: input.location.timezone,
+      qualityScore: best1HourSlot.qualityScore,
+      weatherReasons: best1HourSlot.weatherReasons,
+      astroReasons: best1HourSlot.astroReasons,
+      moodReason: best1HourSlot.moodReason,
+    },
+    best3Hours: {
+      startLocal: slotResults[best3HourStartIdx].time,
+      endLocal: best3HourEnd.time,
+      timezone: input.location.timezone,
+      qualityScore: best3HourMean,
+      weatherReasons: [
+        ...slotResults[best3HourStartIdx].weatherReasons,
+        ...slotResults[best3HourStartIdx + 1]?.weatherReasons,
+        ...slotResults[best3HourStartIdx + 2]?.weatherReasons,
+      ].filter(Boolean),
+      astroReasons: [
+        ...slotResults[best3HourStartIdx].astroReasons,
+        ...slotResults[best3HourStartIdx + 1]?.astroReasons,
+        ...slotResults[best3HourStartIdx + 2]?.astroReasons,
+      ].filter(Boolean),
+      moodReason: best1HourSlot.moodReason,
+    },
+    fallback: {
+      used: fallbackUsed,
+      threshold,
+      reason: fallbackUsed
+        ? `Both best 1-hour (${best1HourSlot.qualityScore}/100) and best 3-hour (${best3HourMean}/100) are below threshold ${threshold}. Returned best available windows.`
+        : null,
+      returnedBestAvailable: fallbackUsed,
+    },
+    sourceRecords: {
+      astrology: {
+        provider: "Free Astrology API",
+        endpointFamily: "western/planets",
+        fetchedAtUtc: skyProfile.fetchedAtUtc,
+      },
+      weather: {
+        provider: "Open-Meteo",
+        fetchedAtUtc: new Date().toISOString(),
+        horizonHours: windowHoursAhead,
+      },
+    },
+    caveats: [
+      `reflection-window-v1 uses a threshold of ${threshold} as a design assumption.",
+      "Three-hour quality is the rounded mean of three consecutive hourly scores.",
+      "Weather data is current and may change; window times are local to the requested location.",
+    ],
+    disclaimer: "Reflective practice only. Not medical, financial, legal, or predictive advice.",
+  };
+}
+
+/** Convert a full comparison into compact JSON another agent can consume. */
+export async function generateAgentBrief(
+  env: { FREE_ASTROLOGY_API_KEY: string },
+  input: CompareInput
+): Promise<{
+  schemaVersion: "agent-brief-v1";
+  methodVersion: "score-v1";
+  asOfUtc: string;
+  recommendedCity: City;
+  bestTime: { startLocal: string; endLocal: string; timezone: string; qualityScore: number };
+  why: string;
+  avoidIfConditions: string[];
+  sourceRecords: {
+    astrology: {
+      provider: string;
+      endpointFamily: string;
+      asOfUtc: string;
+      dominantElements: string[];
+      keyPlanet: string;
+    };
+    weather: Array<{ provider: string; location: City; weatherEvidence: RankedLocation["weatherEvidence"] }>;
+  };
+  disclaimer: string;
+}> {
+  const asOfUtc = input.asOfUtc ?? new Date().toISOString();
+  const result = await compareLocations(env, input);
+  const first = result.rankedLocations[0];
+
+  // Build avoidIfConditions from live-weather-change, high mismatch, precipitation, strong wind, weak-window
+  const avoidIfConditions: string[] = [];
+  if (first.moodWeatherMismatch > 50) {
+    avoidIfConditions.push("High mood-weather mismatch (>50): activation level may not match outdoor conditions.");
+  }
+  if (first.weatherEvidence.precipitation > 0) {
+    avoidIfConditions.push(`Precipitation detected (${first.weatherEvidence.precipitation}mm): conditions may change.`);
+  }
+  if (first.weatherEvidence.windSpeed > 30) {
+    avoidIfConditions.push(`Strong wind (${first.weatherEvidence.windSpeed}km/h): may affect outdoor plans.`);
+  }
+  if (first.bestReflectionWindow.quality < 65) {
+    avoidIfConditions.push(`Best window quality below 65 (${first.bestReflectionWindow.quality}/100): no strong reflection window available.`);
+  }
+  if (!first.weatherEvidence.isDay) {
+    avoidIfConditions.push("Nighttime at recommended location: daytime may be more activating.");
+  }
+
+  return {
+    schemaVersion: "agent-brief-v1",
+    methodVersion: "score-v1",
+    asOfUtc,
+    recommendedCity: first.location,
+    bestTime: {
+      startLocal: first.bestReflectionWindow.startLocal,
+      endLocal: first.bestReflectionWindow.endLocal,
+      timezone: first.location.timezone,
+      qualityScore: first.bestReflectionWindow.quality,
+    },
+    why: result.whyFirstPlace,
+    avoidIfConditions,
+    sourceRecords: {
+      astrology: {
+        provider: "Free Astrology API",
+        endpointFamily: "western/planets",
+        asOfUtc,
+        dominantElements: result.skyProfile.dominantElements,
+        keyPlanet: result.skyProfile.keyPlanet,
+      },
+      weather: result.rankedLocations.map((r) => ({
+        provider: "Open-Meteo",
+        location: r.location,
+        weatherEvidence: r.weatherEvidence,
+      })),
+    },
+    disclaimer: result.disclaimer,
   };
 }
