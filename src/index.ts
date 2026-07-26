@@ -1,15 +1,16 @@
 // AstroRoute Worker entry.
 // Routes:
-//   POST /mcp                - MCP Streamable HTTP (agents/mcp)
-//   POST /api/compare        - REST adapter for the browser
-//   GET  /healthz            - health check
-//   GET  /agents-guide.md    - served from public/ assets
-//   GET  /*                  - static assets (public/)
+//   POST /mcp              - MCP Streamable HTTP (Web Standard transport)
+//   POST /api/compare      - REST adapter for the browser
+//   GET  /healthz          - health check
+//   GET  /agents-guide.md  - served from public/ assets
+//   GET  /*                - static assets (public/)
 //
 // CORS is open for any origin. Browser only calls same-origin /api/compare.
 
 import { createAstroRouteMcpServer } from "./mcp";
 import { compareLocations, validateCompareInput } from "./scoring";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
 export interface Env {
   ASSETS: Fetcher;
@@ -34,17 +35,32 @@ function corsPreflight(): Response {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") return corsPreflight();
 
-    // MCP endpoint (Streamable HTTP). Stateless: new server per request.
+    // MCP endpoint (Streamable HTTP). Stateless: new server + transport per request.
     if (url.pathname === "/mcp" || url.pathname === "/mcp/") {
       const server = createAstroRouteMcpServer();
-      const handler = (await import("agents/mcp")).createMcpHandler(server);
-      return handler.fetch(request, env, ctx);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      await server.connect(transport);
+      return withCors(await transport.handleRequest(request));
     }
 
     // Health check (no provider calls).
