@@ -1,7 +1,7 @@
 // Wikimedia place-context adapter for AstroRoute v0.3.
 // Uses keyless public APIs:
-//   - MediaWiki OpenSearch for page title resolution
-//   - Wikimedia REST Page Summary for description, extract, coordinates
+//   - MediaWiki OpenSearch for page title resolution (returns flat array: [query, titles[], descriptions[], urls[]])
+//   - Wikimedia REST Page Summary for description, extract, coordinates (returns object with title/description/extract/coordinates)
 // Strictly bounded:
 //   - descriptive User-Agent
 //   - 3 second timeout per upstream request
@@ -125,9 +125,9 @@ function clampString(
   return trimmed.length <= max ? trimmed : trimmed.slice(0, max - 1) + "\u2026";
 }
 
-interface OpenSearchPayload {
-  results?: [string[], string[], Array<{ title?: string }>];
-}
+// MediaWiki OpenSearch returns a flat array: [query, titles[], descriptions[], urls[]].
+// Index 1 contains resolved page titles, index 3 contains wikipedia urls.
+type OpenSearchPayload = [unknown, string[], unknown[], unknown[]];
 
 interface PageSummaryPayload {
   title?: string;
@@ -207,7 +207,7 @@ export async function fetchPlaceContext(
   if (!resolved.ok) return unavailable(`resolve failed (${resolved.reason})`, null, fetchedAtUtc);
 
   const os = resolved.data as OpenSearchPayload;
-  const title = os.results?.[2]?.[0]?.title;
+  const title = Array.isArray(os) && Array.isArray(os[1]) ? os[1][0] : undefined;
   if (!title) return unavailable("no open search result", null, fetchedAtUtc);
 
   const summaryUrl = `${SUMMARY_BASE}${encodeURIComponent(title)}`;
