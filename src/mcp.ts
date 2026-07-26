@@ -1,5 +1,5 @@
 // MCP server factory.
-// Uses the @modelcontextprotocol/sdk McpServer class to expose 4 tools via Streamable HTTP at /mcp.
+// Uses the @modelcontextprotocol/sdk McpServer class to expose 7 tools via Streamable HTTP at /mcp.
 // Stateless: src/index.ts creates a fresh server per request.
 
 import { z } from "zod";
@@ -8,6 +8,9 @@ import {
   CompareInputSchema,
   compareLocations,
   validateCompareInput,
+  explainLocationScore,
+  findReflectionWindow,
+  generateAgentBrief,
 } from "./scoring";
 import { fetchWesternSkyProfile } from "./astro";
 import { fetchLocationWeather } from "./weather";
@@ -22,7 +25,7 @@ const CityShape = {
 export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: string }): McpServer {
   const server = new McpServer({
     name: "astroroute",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   // --- Tool 1: get_western_sky_profile ---
@@ -154,6 +157,15 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             "rankedLocations sorted by astroWeatherFitScore descending",
             "disclaimer exactly matches the safety string",
           ],
+          sevenTools: [
+            "get_western_sky_profile",
+            "get_location_weather",
+            "compare_astro_weather_locations",
+            "get_agent_test_fixture",
+            "explain_score_components",
+            "find_reflection_window",
+            "generate_agent_brief",
+          ],
         },
         validation_errors_v1: {
           description:
@@ -195,6 +207,141 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
         content: [{ type: "text", text: JSON.stringify(fixture, null, 2) }],
         structuredContent: fixture,
       };
+    }
+  );
+
+  // --- Tool 5: explain_score_components ---
+  server.tool(
+    "explain_score_components",
+    "Explain why one selected candidate received its score after a comparison. Takes the full compare request plus a targetLocationName that must match exactly one candidate name. Returns the score breakdown with weighted contributions, element alignment, and caveats.",
+    {
+      moodScore: z
+        .number()
+        .min(0)
+        .max(10)
+        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      candidates: z
+        .array(z.object(CityShape))
+        .min(2)
+        .max(3)
+        .describe("Candidate cities (must include the targetLocationName)."),
+      asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
+      targetLocationName: z
+        .string()
+        .min(1)
+        .max(80)
+        .describe("Exact name of the candidate to explain. Must match one candidate.name exactly."),
+    },
+    async (args) => {
+      const validation = validateCompareInput({
+        moodScore: args.moodScore,
+        candidates: args.candidates,
+        asOfUtc: args.asOfUtc,
+      });
+      if (!validation.ok) {
+        return {
+          content: [{ type: "text", text: `Invalid input: ${validation.error}` }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await explainLocationScore(env as any, {
+          ...validation.value,
+          targetLocationName: args.targetLocationName,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${e.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool 6: find_reflection_window ---
+  server.tool(
+    "find_reflection_window",
+    "Find the best 1-hour and 3-hour reflection windows for a single location. Uses the existing Western sky snapshot and Open-Meteo forecast. Birth profile interpretation: geocentric tropical Western sky for asOfUtc at the concrete location. No birth data required.",
+    {
+      location: z
+        .object(CityShape)
+        .describe("Concrete location with name, latitude, longitude, and timezone."),
+      moodScore: z
+        .number()
+        .min(0)
+        .max(10)
+        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
+      windowHoursAhead: z
+        .number()
+        .int()
+        .min(3)
+        .max(24)
+        .optional()
+        .describe("How many hours ahead to search. Default 24, max 24 (matches Open-Meteo forecast horizon)."),
+    },
+    async (args) => {
+      try {
+        const result = await findReflectionWindow(env as any, {
+          location: args.location,
+          moodScore: args.moodScore,
+          asOfUtc: args.asOfUtc,
+          windowHoursAhead: args.windowHoursAhead,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${e.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool 7: generate_agent_brief ---
+  server.tool(
+    "generate_agent_brief",
+    "Convert a full comparison into compact JSON another agent can consume without parsing the full ranked payload. Returns recommended city, best time window, reasoning, avoid-if conditions, and source records.",
+    {
+      moodScore: z
+        .number()
+        .min(0)
+        .max(10)
+        .describe("Self-reported mood activation: 0 = very low, 10 = very high."),
+      candidates: z
+        .array(z.object(CityShape))
+        .min(2)
+        .max(3)
+        .describe("Candidate cities to compare."),
+      asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
+    },
+    async (args) => {
+      const validation = validateCompareInput(args);
+      if (!validation.ok) {
+        return {
+          content: [{ type: "text", text: `Invalid input: ${validation.error}` }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await generateAgentBrief(env as any, validation.value);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${e.message}` }],
+          isError: true,
+        };
+      }
     }
   );
 
