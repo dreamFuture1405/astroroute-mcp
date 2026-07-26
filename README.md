@@ -1,55 +1,119 @@
 # AstroRoute
 
-Astro-Weather Location Comparison MCP server on Cloudflare Workers.
+AstroRoute is an Astro-weather location comparison MCP server on Cloudflare Workers. It ranks two or three candidate cities for reflective practice using a Western sky profile, live weather, and optional place context.
 
 ## What it does
 
-Given the user's current mood activation (0-10) and 2-3 candidate cities, AstroRoute returns:
+Given a mood activation score, candidate City objects, and optional rich context, AstroRoute returns:
 
 - Ranked candidate locations
-- `astroWeatherFitScore` (0-100) per location
-- `moodWeatherMismatch` (0-100) per location
-- `elementWeatherAlignment` (0-100) per location with signal explanation
-- `dayNightTimingNote` per location
-- `bestReflectionWindow` (start, end, quality, reason) per location
-- `whyFirstPlace` (top-level explanation)
-- Safety disclaimer (reflective practice only; not medical, financial, legal, or predictive advice)
+- `astroWeatherFitScore` and, on the rich path, `v3.finalScoreV3`
+- `moodWeatherMismatch`
+- `elementWeatherAlignment` with signal explanations
+- `dayNightTimingNote`
+- `bestReflectionWindow`
+- `whyFirstPlace`
+- Optional four-axis mood profile metadata
+- Optional Wikimedia place context, tags, evidence terms, and fallback state
+- The exact safety disclaimer
 
-With Attempt #2, three additional agent-facing MCP tools are available:
-
-- `explain_score_components` - detailed score breakdown for a selected candidate
-- `find_reflection_window` - best 1-hour and 3-hour windows for a single location
-- `generate_agent_brief` - compact JSON brief for downstream agent consumption
+The deployed Worker version is 0.3.0.
 
 ## Architecture
 
-- Cloudflare Worker Free plan
-- Static frontend served by the same Worker (via Static Assets)
+- Cloudflare Worker with Static Assets
+- Same-origin frontend at `/`
 - MCP Streamable HTTP endpoint at `/mcp`
-- REST adapter at `/api/compare` (same domain service as the MCP tool)
-- Health check at `/healthz`
-- Agents Guide served as static asset at `/agents-guide.md`
-- Free Astrology API for sky profiles (server-side key)
-- Open-Meteo for weather (no key required)
-- No LLM in the comparison path
-- Deterministic scoring engine (`score-v1`)
-- No Durable Objects (stateless McpServer per request)
+- REST adapter at `POST /api/compare`
+- Health check at `GET /healthz`
+- Agents Guide at `/agents-guide.md`
+- Free Astrology API western/planets adapter in `src/astro.ts`
+- Open-Meteo weather adapter in `src/weather.ts`
+- Keyless Wikimedia OpenSearch and English Wikipedia Page Summary adapter in `src/place.ts`
+- Deterministic scoring in `src/scoring.ts`
+- Stateless MCP server factory in `src/mcp.ts`
+- No LLM, database, or new paid provider in the comparison path
 
-## File list (v2, exactly 13 files)
+## Input and compatibility
 
-1. `package.json` - dependencies and scripts
-2. `wrangler.jsonc` - Cloudflare Worker config
-3. `src/index.ts` - Worker entry: routing, MCP delegation, REST adapter, static asset fallback
-4. `src/astro.ts` - Free Astrology API client (Western/Planets, geocentric)
-5. `src/weather.ts` - Open-Meteo client (current + 24h hourly + sunrise/sunset)
-6. `src/scoring.ts` - zod validation + scoring math + comparison orchestration + new agent helpers
-7. `src/mcp.ts` - MCP server factory with 7 tools
-8. `public/index.html` - frontend form + result display
-9. `public/styles.css` - frontend styles
-10. `public/app.js` - frontend logic
-11. `public/agents-guide.md` - MCP integration guide (7 tools documented)
-12. `README.md` - this file
-13. `test-plan.md` - local validation checklist (no automated tests in v2)
+Every comparison uses this City shape:
+
+```json
+{
+  "name": "Tokyo",
+  "latitude": 35.6762,
+  "longitude": 139.6503,
+  "timezone": "Asia/Tokyo"
+}
+```
+
+Required comparison fields are `moodScore` from 0 to 10 and two or three candidate cities. Optional v0.3 fields are:
+
+```json
+{
+  "moodProfile": {
+    "energy": 7,
+    "stress": 4,
+    "focus": 6,
+    "socialBattery": 7
+  },
+  "includePlaceContext": true
+}
+```
+
+A request without the optional rich fields keeps `methodVersion: "score-v1"`, the existing core response fields, and the existing score-v1 formula. A request with `moodProfile` or `includePlaceContext` uses `methodVersion: "score-v3"` and returns rich metadata such as `derivedMoodProfile`, `rankedLocations[].v3`, `placeContextList`, and `scoreV3Weights`.
+
+The browser UI has four mood sliders, each defaulting to 5. It sends `moodScore` equal to the energy slider for compatibility, sends the full `moodProfile`, and provides an opt-in Wikimedia context checkbox.
+
+## Scoring
+
+The score-v1 path uses:
+
+- `weatherActivation`: bounded 0 to 10 signal from temperature comfort, daylight, wind, cloud cover, and precipitation
+- `moodWeatherMismatch`: `round(abs(moodScore - weatherActivation) * 10)`
+- `elementWeatherAlignment`: bounded 0 to 100 signal from sky elements and observable weather
+- `reflectionWindowQuality`: bounded 0 to 100 quality of the best one-hour slot
+- `astroWeatherFitScore`: `round(0.45 * element + 0.35 * (100 - mismatch) + 0.20 * window)`
+
+The score-v3 path keeps the score-v1 result as its base and adds bounded mood and place components. Baseline weights are base 0.70, mood 0.20, and place 0.10 when both components are active. Active weights adjust when only one optional component is active. These weights are design heuristics, not scientific or predictive conclusions.
+
+Wikimedia tags use a closed taxonomy: `coastal`, `urban_dense`, `historic`, `green_space`, `creative`, `quiet`, `nightlife`, and `transit_hub`. Tags are inferred from bounded title, description, and extract text. They are heuristic context, not factual classifications.
+
+## MCP tools
+
+The server exposes exactly eight tools:
+
+1. `get_western_sky_profile` returns a geocentric tropical Western sky snapshot.
+2. `get_location_weather` returns current conditions, 24 hourly records, sunrise, and sunset.
+3. `compare_astro_weather_locations` ranks candidate cities and returns windows and explanations.
+4. `get_agent_test_fixture` returns fixed inputs, expected fields, invariants, and the eight-tool set.
+5. `explain_score_components` explains a selected candidate's weighted score.
+6. `find_reflection_window` returns the strongest one-hour and three-hour windows for one City.
+7. `generate_agent_brief` returns a compact downstream-agent handoff.
+8. `get_place_context` returns Wikimedia place context directly to an agent.
+
+See `public/agents-guide.md` for request examples and response fields.
+
+## Core file set
+
+The runtime implementation and documentation set contains 14 core files:
+
+1. `package.json`
+2. `wrangler.jsonc`
+3. `src/index.ts`
+4. `src/astro.ts`
+5. `src/weather.ts`
+6. `src/scoring.ts`
+7. `src/mcp.ts`
+8. `src/place.ts`
+9. `public/index.html`
+10. `public/styles.css`
+11. `public/app.js`
+12. `public/agents-guide.md`
+13. `README.md`
+14. `test-plan.md`
+
+The repository also contains a pre-existing `test_connection_check.txt` file. It is not part of the runtime contract and is intentionally unchanged by the v0.3 UI and documentation update.
 
 ## Local development
 
@@ -58,57 +122,39 @@ npm install
 npx wrangler dev
 ```
 
-The Worker expects `FREE_ASTROLOGY_API_KEY` to be set as a secret. For local dev, create a `.dev.vars` file (do not commit it):
+For local development, provide the Worker secret through an uncommitted `.dev.vars` file or the normal Wrangler secret workflow:
 
-```
+```text
 FREE_ASTROLOGY_API_KEY=your_key_here
 ```
 
-## Deploy (manual Cloudflare Git deployment)
+Never commit `.dev.vars` or a real key.
 
-1. Push this repository to GitHub.
-2. In Cloudflare Dashboard, create a new Worker connected to the repository, OR run `npx wrangler deploy` after authenticating with Cloudflare.
-3. Set the secret:
-   ```bash
-   npx wrangler secret put FREE_ASTROLOGY_API_KEY
-   ```
-4. Verify with `GET https://<your-worker>.workers.dev/healthz`.
+## Deployment
 
-## Required secrets
+1. Connect the repository to a Cloudflare Worker through the Cloudflare Dashboard, or authenticate Wrangler locally.
+2. Set `FREE_ASTROLOGY_API_KEY` as a Worker secret.
+3. Run `npx wrangler deploy` when deploying manually.
+4. Verify `GET /healthz`, the static UI, `/agents-guide.md`, the REST comparison, and the MCP endpoint.
 
-- `FREE_ASTROLOGY_API_KEY` - Free Astrology API key (server-side only)
+The v0.3 test sequence and stop conditions are in `test-plan.md`.
 
-Open-Meteo is keyless for normal public usage.
+## Security
 
-## MCP tools (7 total)
-
-1. `get_western_sky_profile` - fetch geocentric sky profile for a reference location and timestamp
-2. `get_location_weather` - fetch current + 24h hourly + sunrise/sunset for a city
-3. `compare_astro_weather_locations` - main entry: rank 2-3 cities by reflection-window fit
-4. `get_agent_test_fixture` - return a fixed test fixture with expected schema/invariants
-5. `explain_score_components` - detailed score breakdown for a named candidate
-6. `find_reflection_window` - best 1-hour and 3-hour windows for a single location
-7. `generate_agent_brief` - compact brief for downstream agent consumption
-
-## Scoring (score-v1)
-
-- `weatherActivation` (0-10): weighted from temperature comfort, daylight, wind, cloud, precipitation
-- `moodWeatherMismatch` (0-100): `round(abs(moodScore - weatherActivation) * 10)`
-- `elementWeatherAlignment` (0-100): element-based bonuses grounded in observable weather signals
-- `reflectionWindowQuality` (0-100): best 1-hour slot in the next 24 hours
-- `astroWeatherFitScore` (0-100): `round(0.45 * element + 0.35 * (100 - mismatch) + 0.20 * window)`
-
-Tie-break: lower mismatch, then earlier window, then input order.
-
-## Reflection window scoring (reflection-window-v1)
-
-- Uses same three factor families as score-v1 applied per hourly slot
-- Three-hour quality is the rounded mean of three consecutive hourly scores
-- Fallback threshold: 65 (both best 1-hour and best 3-hour below 65 triggers fallback)
+- `FREE_ASTROLOGY_API_KEY` is used only server-side by the Worker.
+- The browser calls only same-origin `/api/compare`.
+- No provider key is included in public assets, response bodies, or response headers.
+- Upstream errors are sanitized and raw upstream bodies are not returned.
+- No LLM is used in the scoring path.
 
 ## Limitations
 
-- Free Astrology API: 50 calls/day free tier, 1 call/sec rate limit.
-- Geocentric sky profile is shared across cities in one comparison (1 astrology call per comparison).
-- Scoring weights are design assumptions; human-interpretation gates are described in `test-plan.md`.
-- Reflective practice only. Not medical, financial, legal, or predictive advice.
+- Weather and rankings are dynamic and can change between requests.
+- The geocentric sky profile is shared across candidate cities in one comparison.
+- Wikimedia summaries can be incomplete or unavailable.
+- Scoring weights and tag mappings are explicit heuristics.
+- The tool does not provide medical, financial, legal, or predictive advice.
+
+## Disclaimer
+
+Reflective practice only. Not medical, financial, legal, or predictive advice.
