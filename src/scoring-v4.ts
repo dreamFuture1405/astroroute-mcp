@@ -17,10 +17,16 @@ import {
   type RankedLocation,
   type ComparisonResult,
   type MoodProfile,
-  clamp01to100,
 } from "./scoring";
 import type { SpaceWeatherBundle } from "./spaceweather";
 import { fetchSpaceWeatherBundle } from "./spaceweather";
+
+// ----- Local helpers -----
+
+function clamp01to100(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
 
 // ----- Schemas -----
 
@@ -47,8 +53,8 @@ export type ComparisonResultV4 = Omit<ComparisonResultV3, "methodVersion" | "ran
   methodVersion: "score-v1" | "score-v3" | "score-v4";
   rankedLocations: Array<
     RankedLocation &
-    { v3: RankedLocationV3 | null } &
-    { v4: RankedLocationV4 | null }
+      { v3: RankedLocationV3 | null } &
+      { v4: RankedLocationV4 | null }
   >;
   spaceWeatherBundle: SpaceWeatherBundle | null;
   spaceWeatherFallback: { reason: string; httpStatuses: number[] } | null;
