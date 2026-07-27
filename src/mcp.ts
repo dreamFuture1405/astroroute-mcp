@@ -1,9 +1,11 @@
 // MCP server factory.
-// Uses the @modelcontextprotocol/sdk McpServer class to expose 8 tools via Streamable HTTP at /mcp.
+// Uses the @modelcontextprotocol/sdk McpServer class to expose 9 tools via Streamable HTTP at /mcp.
 // Stateless: src/index.ts creates a fresh server per request.
 // v0.2 -> v0.3: Tool 3 schema accepts optional moodProfile + includePlaceContext (route to score-v3).
 // Tool 8 (get_place_context) added; remaining 7 tools unchanged in name + required fields.
-// Version string bumped to "0.3.0".
+// v0.3 -> v0.4: Tool 3 schema accepts optional includeSpaceWeather (route to score-v4).
+// Tool 9 (get_space_weather_context) added; returns global NOAA SWPC space weather bundle.
+// Version string bumped to "0.4.0".
 
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -19,9 +21,14 @@ import {
   compareLocationsV3,
   validateCompareInputV3,
 } from "./scoring";
+import {
+  validateCompareInputV4,
+  compareLocationsV4,
+} from "./scoring-v4";
 import { fetchWesternSkyProfile } from "./astro";
 import { fetchLocationWeather } from "./weather";
 import { fetchPlaceContext } from "./place";
+import { fetchSpaceWeatherBundle } from "./spaceweather";
 
 const CityShape = {
   name: z.string().min(1).max(80),
@@ -40,7 +47,7 @@ const MoodAxesShape = {
 export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: string }): McpServer {
   const server = new McpServer({
     name: "astroroute",
-    version: "0.3.0",
+    version: "0.4.0",
   });
 
   // --- Tool 1: get_western_sky_profile ---
@@ -87,27 +94,46 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 3: compare_astro_weather_locations (main entry) ---
   server.tool(
     "compare_astro_weather_locations",
-    "Compare 2-3 candidate cities and recommend the best reflection window. Required inputs: moodScore (0-10) and 2-3 candidates. Optional v0.3 fields: moodProfile (energy, stress, focus, socialBattery; each 0-10) and includePlaceContext (boolean). When v0.3 fields are absent the response uses score-v1 (preserved exactly from v0.2). When present, the response uses score-v3 with weighted base/mood/place components. Returns ranked locations with astroWeatherFitScore, moodWeatherMismatch, elementWeatherAlignment, bestReflectionWindow, whyFirstPlace, derivedMoodProfile (when v0.3), placeContextList (when includePlaceContext), and a safety disclaimer.",
+    "Compare 2-3 candidate cities and recommend the best reflection window. Required inputs: moodScore (0-10) and 2-3 candidates. Optional fields: moodProfile (energy, stress, focus, socialBattery; each 0-10), includePlaceContext (boolean), and includeSpaceWeather (boolean). When no optional fields are active the response uses score-v1. When moodProfile or includePlaceContext is active, score-v3 is used. When includeSpaceWeather is true, score-v4 is used with NOAA SWPC space weather data as a fourth scoring component (weights: base 0.55, mood 0.18, place 0.10, spaceWeather 0.17). If NOAA SWPC is unavailable, score-v4 renormalizes weights and sets spaceWeather=null. Returns ranked locations with all score components, bestReflectionWindow, whyFirstPlace, and a safety disclaimer.",
     {
       moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low/quiet energy, 10 = very high/activated energy."),
       candidates: z.array(z.object(CityShape)).min(2).max(3).describe("Candidate cities to compare."),
       asOfUtc: z.string().datetime().optional().describe("ISO 8601 UTC timestamp. Defaults to now."),
       moodProfile: MoodProfileSchema.optional().describe("Optional v0.3 four-axis mood profile; defaults are derived from moodScore when omitted."),
-      includePlaceContext: z.boolean().optional().describe("Optional v0.3: when true, fetch per-candidate Wikimedia place context to combine with mood profile for score-v3."),
+      includePlaceContext: z.boolean().optional().describe("Optional v0.3: when true, fetch per-candidate Wikimedia place context for score-v3."),
+      includeSpaceWeather: z.boolean().optional().describe("Optional v0.4: when true, fetch NOAA SWPC space weather for score-v4. Space weather is global, not per-city."),
     },
     async (args) => {
-      const v3Validation = validateCompareInputV3(args);
-      if (!v3Validation.ok) {
+      const v4Validation = validateCompareInputV4(args);
+      if (!v4Validation.ok) {
         return {
-          content: [{ type: "text", text: `Invalid input: ${v3Validation.error}` }],
+          content: [{ type: "text", text: `Invalid input: ${v4Validation.error}` }],
           isError: true,
         };
       }
+
+      // v0.4 path: includeSpaceWeather=true
+      if (args.includeSpaceWeather === true) {
+        try {
+          const result = await compareLocationsV4(env as any, v4Validation.value);
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            structuredContent: result,
+          };
+        } catch (e: any) {
+          return {
+            content: [{ type: "text", text: `Error: ${e.message}` }],
+            isError: true,
+          };
+        }
+      }
+
+      // v0.3 path
       const moodProfileActive =
         args.moodProfile !== undefined && Object.keys(args.moodProfile).length > 0;
       const placeContextActive = args.includePlaceContext === true;
       if (!moodProfileActive && !placeContextActive) {
-        const v1Validation = validateCompareInput(v3Validation.value);
+        const v1Validation = validateCompareInput(v4Validation.value);
         if (!v1Validation.ok) {
           return {
             content: [{ type: "text", text: `Invalid input: ${v1Validation.error}` }],
@@ -120,7 +146,7 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
           structuredContent: result,
         };
       }
-      const result = await compareLocationsV3(env as any, v3Validation.value);
+      const result = await compareLocationsV3(env as any, v4Validation.value);
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         structuredContent: result,
@@ -134,7 +160,7 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
     "Return a fixed test fixture (deterministic input + expected schema/assertions) for verifying MCP behavior. Weather scores will not match exactly because live weather changes, but the schema and ranking invariants hold.",
     {
       fixtureId: z
-        .enum(["three_city_live_v1", "validation_errors_v1", "v0_3_wikimedia_tokyo"])
+        .enum(["three_city_live_v1", "validation_errors_v1", "v0_3_wikimedia_tokyo", "v0_4_space_weather"])
         .optional()
         .default("three_city_live_v1"),
     },
@@ -183,8 +209,9 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             "find_reflection_window",
             "generate_agent_brief",
             "get_place_context",
+            "get_space_weather_context",
           ],
-          version: "0.3.0",
+          version: "0.4.0",
         },
         validation_errors_v1: {
           description:
@@ -255,8 +282,49 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
             "find_reflection_window",
             "generate_agent_brief",
             "get_place_context",
+            "get_space_weather_context",
           ],
-          version: "0.3.0",
+          version: "0.4.0",
+        },
+        v0_4_space_weather: {
+          description:
+            "v0.4 schema: includeSpaceWeather=true. Use to verify get_space_weather_context and score-v4 path.",
+          inputs: {
+            moodScore: 7,
+            candidates: [
+              { name: "Tokyo", latitude: 35.6762, longitude: 139.6503, timezone: "Asia/Tokyo" },
+              { name: "Reykjavik", latitude: 64.1466, longitude: -21.9426, timezone: "Atlantic/Reykjavik" },
+              { name: "Buenos Aires", latitude: -34.6037, longitude: -58.3816, timezone: "America/Argentina/Buenos_Aires" },
+            ],
+            asOfUtc: "2026-07-27T00:00:00Z",
+            includeSpaceWeather: true,
+          },
+          expectedSchema: {
+            methodVersion: "score-v4",
+            spaceWeatherBundle: "object with currentKpIndex, geomagneticActivity, solarActivity, sunspotCount, spaceWeatherFit (0-100), sourceRecords",
+            spaceWeatherFallback: "null when NOAA succeeds, object with reason when NOAA fails",
+            rankedLocations:
+              "array; each entry has v4.spaceWeatherFit (number|null), v4.spaceWeatherBundle (object|null), v4.spaceWeatherFallback",
+            scoreV4Weights: "{ base: 0.55, mood: 0.18, place: 0.10, spaceWeather: 0.17 } when NOAA succeeds, renormalized when fails",
+          },
+          invariants: [
+            "methodVersion == 'score-v4'",
+            "sum of scoreV4Weights == 1.0",
+            "scoreV4Weights.spaceWeather == 0.17 when NOAA succeeds, 0 when fails",
+            "spaceWeatherBundle.sourceRecords[*].provider == 'services.swpc.noaa.gov' when NOAA succeeds",
+          ],
+          tools: [
+            "get_western_sky_profile",
+            "get_location_weather",
+            "compare_astro_weather_locations",
+            "get_agent_test_fixture",
+            "explain_score_components",
+            "find_reflection_window",
+            "generate_agent_brief",
+            "get_place_context",
+            "get_space_weather_context",
+          ],
+          version: "0.4.0",
         },
       };
 
@@ -271,7 +339,7 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
   // --- Tool 5: explain_score_components ---
   server.tool(
     "explain_score_components",
-    "Explain why one selected candidate received its score after a comparison. Takes the full compare request plus a targetLocationName that must match exactly one candidate name. Returns the score breakdown with weighted contributions, element alignment, and caveats. (v0.2 score-v1 path; for v0.3 explanations, use compare_astro_weather_locations with v0.3 fields and inspect the v3 block.)",
+    "Explain why one selected candidate received its score after a comparison. Takes the full compare request plus a targetLocationName that must match exactly one candidate. Returns the score breakdown with weighted contributions, element alignment, and caveats. (v0.2 score-v1 path; for v0.3 explanations, use compare_astro_weather_locations with v0.3 fields and inspect the v3 block.)",
     {
       moodScore: z.number().min(0).max(10).describe("Self-reported mood activation: 0 = very low, 10 = very high."),
       candidates: z.array(z.object(CityShape)).min(2).max(3).describe("Candidate cities (must include the targetLocationName)."),
@@ -384,6 +452,51 @@ export function createAstroRouteMcpServer(env?: { FREE_ASTROLOGY_API_KEY?: strin
         return {
           content: [{ type: "text", text: JSON.stringify(ctx, null, 2) }],
           structuredContent: ctx,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `Error: ${e.message}` }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // --- Tool 9: get_space_weather_context (v0.4) ---
+  server.tool(
+    "get_space_weather_context",
+    "Fetch current global space weather conditions from NOAA SWPC (keyless). Returns current Kp index, geomagnetic activity category, solar flare probabilities (C/M/X class), sunspot count, active regions, a derived spaceWeatherFit score (0-100 for astrotourism/stargazing suitability), and source records for audit. Space weather is GLOBAL (not per-city), so all candidate cities share the same spaceWeatherFit value. If NOAA SWPC is unavailable, returns a fallback state with reason. No API key required.",
+    {},
+    async () => {
+      try {
+        const result = await fetchSpaceWeatherBundle();
+        if (result.bundle) {
+          return {
+            content: [{ type: "text", text: JSON.stringify(result.bundle, null, 2) }],
+            structuredContent: result.bundle,
+          };
+        }
+        // NOAA failed → return fallback with error info
+        const fallbackResponse = {
+          currentKpIndex: null,
+          estimatedKp: null,
+          geomagneticActivity: null,
+          cClassProbToday: null,
+          mClassProbToday: null,
+          xClassProbToday: null,
+          solarActivity: null,
+          sunspotCount: null,
+          activeRegions: null,
+          spaceWeatherFit: null,
+          sourceRecords: [],
+          fetchedAt: new Date().toISOString(),
+          cacheTtlSeconds: 0,
+          fallback: result.fallback,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(fallbackResponse, null, 2) }],
+          structuredContent: fallbackResponse,
+          isError: true,
         };
       } catch (e: any) {
         return {
