@@ -1,6 +1,7 @@
 // AstroRoute frontend.
 // Communicates with the same-origin /api/compare endpoint only.
 // No API keys, no third-party network calls, no model provider calls from the browser.
+// v0.4: adds includeSpaceWeather checkbox support and renders score-v4 data.
 
 const PRESETS = [
   { name: "Hanoi", latitude: 21.0285, longitude: 105.8542, timezone: "Asia/Ho_Chi_Minh" },
@@ -103,12 +104,16 @@ document.getElementById("compare-form").addEventListener("submit", async (event)
   const submitButton = document.getElementById("submit-btn");
   const placeSection = document.getElementById("place-context-section");
   const placeContent = document.getElementById("place-context-content");
+  const swSection = document.getElementById("space-weather-section");
+  const swContent = document.getElementById("space-weather-content");
 
   submitButton.disabled = true;
   resultsSection.hidden = false;
   resultDiv.innerHTML = "<p>Loading comparison...</p>";
   if (placeSection) placeSection.hidden = true;
   if (placeContent) placeContent.innerHTML = "";
+  if (swSection) swSection.hidden = true;
+  if (swContent) swContent.innerHTML = "";
 
   const candidates = Array.from(document.querySelectorAll(".candidate")).map((div) => ({
     name: div.querySelector('[data-field="name"]').value.trim(),
@@ -122,12 +127,14 @@ document.getElementById("compare-form").addEventListener("submit", async (event)
     moodProfile[control.axis.key] = parseInt(control.slider.value, 10);
   }
   const contextCheckbox = document.getElementById("includePlaceContext");
+  const swCheckbox = document.getElementById("includeSpaceWeather");
 
   const requestBody = {
     moodScore: moodProfile.energy,
     candidates,
     moodProfile,
     includePlaceContext: contextCheckbox ? contextCheckbox.checked : false,
+    includeSpaceWeather: swCheckbox ? swCheckbox.checked : false,
   };
 
   try {
@@ -143,6 +150,7 @@ document.getElementById("compare-form").addEventListener("submit", async (event)
     } else {
       renderResult(data);
       renderPlaceContext(data);
+      renderSpaceWeather(data);
     }
   } catch (error) {
     resultDiv.innerHTML = `<p class="error">Network error: ${escapeHtml(error.message)}</p>`;
@@ -179,7 +187,7 @@ function renderResult(data) {
     `;
   }
 
-  if (data.scoreV3Weights && typeof data.scoreV3Weights === "object") {
+  if (data.scoreV3Weights && typeof data.scoreV3Weights === "object" && methodVersion !== "score-v4") {
     const weights = data.scoreV3Weights;
     html += `
       <div class="v3-weights">
@@ -187,6 +195,19 @@ function renderResult(data) {
         base ${escapeHtml(weights.base ?? "")},
         mood ${escapeHtml(weights.mood ?? "")},
         place ${escapeHtml(weights.place ?? "")}
+      </div>
+    `;
+  }
+
+  if (data.scoreV4Weights && typeof data.scoreV4Weights === "object") {
+    const w = data.scoreV4Weights;
+    html += `
+      <div class="v4-weights">
+        <strong>Score-v4 weights:</strong>
+        base ${escapeHtml(w.base ?? "")},
+        mood ${escapeHtml(w.mood ?? "")},
+        place ${escapeHtml(w.place ?? "")},
+        spaceWeather ${escapeHtml(w.spaceWeather ?? "")}
       </div>
     `;
   }
@@ -210,6 +231,7 @@ function renderResult(data) {
           <span class="score-label">${escapeHtml(displayScore)}/100</span>
         </div>
         ${richScore === null ? "" : `<p><strong>Base score:</strong> ${escapeHtml(baseScore)}/100</p><p><strong>Final score:</strong> ${escapeHtml(richScore)}/100</p>`}
+        ${location.v4 && location.v4.spaceWeatherFit !== null ? `<p><strong>Space weather fit (global):</strong> ${escapeHtml(location.v4.spaceWeatherFit)}/100</p>` : ""}
         <p>Mood-weather mismatch: <strong>${escapeHtml(location.moodWeatherMismatch)}/100</strong> (lower is closer to your activation)</p>
         <p>Element alignment: <strong>${escapeHtml(alignment.score ?? "")}/100</strong></p>
         <p>${escapeHtml(location.dayNightTimingNote ?? "")}</p>
@@ -289,6 +311,51 @@ function renderPlaceContext(data) {
     if (context.provider) html += `<p class="place-provider"><strong>Provider:</strong> ${escapeHtml(context.provider)}</p>`;
     if (context.fetchedAtUtc) html += `<p class="place-fetched"><strong>Fetched:</strong> ${escapeHtml(context.fetchedAtUtc)}</p>`;
     html += "</div>";
+  }
+
+  content.innerHTML = html;
+  section.hidden = false;
+}
+
+function renderSpaceWeather(data) {
+  const section = document.getElementById("space-weather-section");
+  const content = document.getElementById("space-weather-content");
+  if (!section || !content) return;
+
+  const bundle = data.spaceWeatherBundle;
+  const fallback = data.spaceWeatherFallback;
+
+  if (!bundle && !fallback) {
+    section.hidden = true;
+    content.innerHTML = "";
+    return;
+  }
+
+  let html = "";
+
+  if (bundle) {
+    html += `<div class="sw-bundle">`;
+    html += `<h4>NOAA SWPC Space Weather</h4>`;
+    html += `<p><strong>Kp Index:</strong> ${escapeHtml(bundle.currentKpIndex)} (estimated: ${escapeHtml(bundle.estimatedKp)})</p>`;
+    html += `<p><strong>Geomagnetic activity:</strong> ${escapeHtml(bundle.geomagneticActivity)}</p>`;
+    html += `<p><strong>Solar activity:</strong> ${escapeHtml(bundle.solarActivity)}</p>`;
+    html += `<p><strong>Flare probabilities:</strong> C ${escapeHtml(bundle.cClassProbToday)}%, M ${escapeHtml(bundle.mClassProbToday)}%, X ${escapeHtml(bundle.xClassProbToday)}%</p>`;
+    html += `<p><strong>Sunspot count:</strong> ${escapeHtml(bundle.sunspotCount)} (${escapeHtml(bundle.activeRegions)} active regions)</p>`;
+    html += `<p><strong>Space weather fit:</strong> ${escapeHtml(bundle.spaceWeatherFit)}/100</p>`;
+    if (Array.isArray(bundle.sourceRecords) && bundle.sourceRecords.length > 0) {
+      html += `<p class="sw-sources"><strong>Source records:</strong> ${bundle.sourceRecords.map((r) => escapeHtml(r.endpoint)).join(", ")}</p>`;
+    }
+    html += `<p class="sw-fetched"><strong>Fetched:</strong> ${escapeHtml(bundle.fetchedAt)}</p>`;
+    html += `</div>`;
+  }
+
+  if (fallback) {
+    html += `<div class="sw-fallback">`;
+    html += `<p class="fallback-note"><strong>Space weather fallback:</strong> ${escapeHtml(fallback.reason || "unknown")}</p>`;
+    if (Array.isArray(fallback.httpStatuses)) {
+      html += `<p>HTTP statuses: ${fallback.httpStatuses.map(escapeHtml).join(", ")}</p>`;
+    }
+    html += `</div>`;
   }
 
   content.innerHTML = html;
