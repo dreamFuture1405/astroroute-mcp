@@ -1,13 +1,13 @@
 # AstroRoute
 
-AstroRoute is an Astro-weather location comparison MCP server on Cloudflare Workers. It ranks two or three candidate cities for reflective practice using a Western sky profile, live weather, and optional place context.
+AstroRoute is an Astro-weather location comparison MCP server on Cloudflare Workers. It ranks two or three candidate cities for reflective practice using a Western sky profile, live weather, optional Wikimedia place context, and optional NOAA SWPC space weather.
 
 ## What it does
 
 Given a mood activation score, candidate City objects, and optional rich context, AstroRoute returns:
 
 - Ranked candidate locations
-- `astroWeatherFitScore` and, on the rich path, `v3.finalScoreV3`
+- `astroWeatherFitScore` and, on the rich path, `v3.finalScoreV3` or `v4` composite score
 - `moodWeatherMismatch`
 - `elementWeatherAlignment` with signal explanations
 - `dayNightTimingNote`
@@ -15,9 +15,10 @@ Given a mood activation score, candidate City objects, and optional rich context
 - `whyFirstPlace`
 - Optional four-axis mood profile metadata
 - Optional Wikimedia place context, tags, evidence terms, and fallback state
+- Optional NOAA SWPC global space weather data (Kp index, solar activity, sunspot count, spaceWeatherFit)
 - The exact safety disclaimer
 
-The deployed Worker version is 0.3.0.
+The deployed Worker version is 0.4.0.
 
 ## Architecture
 
@@ -30,7 +31,9 @@ The deployed Worker version is 0.3.0.
 - Free Astrology API western/planets adapter in `src/astro.ts`
 - Open-Meteo weather adapter in `src/weather.ts`
 - Keyless Wikimedia OpenSearch and English Wikipedia Page Summary adapter in `src/place.ts`
-- Deterministic scoring in `src/scoring.ts`
+- Keyless NOAA SWPC space weather adapter in `src/spaceweather.ts`
+- Deterministic scoring in `src/scoring.ts` (v1 and v3)
+- Score-v4 extension in `src/scoring-v4.ts` (imports from scoring.ts and spaceweather.ts)
 - Stateless MCP server factory in `src/mcp.ts`
 - No LLM, database, or new paid provider in the comparison path
 
@@ -47,56 +50,51 @@ Every comparison uses this City shape:
 }
 ```
 
-Required comparison fields are `moodScore` from 0 to 10 and two or three candidate cities. Optional v0.3 fields are:
+Required comparison fields are `moodScore` from 0 to 10 and two or three candidate cities. Optional fields are:
 
-```json
-{
-  "moodProfile": {
-    "energy": 7,
-    "stress": 4,
-    "focus": 6,
-    "socialBattery": 7
-  },
-  "includePlaceContext": true
-}
-```
+- `moodProfile` (v0.3): four-axis mood profile
+- `includePlaceContext` (v0.3): boolean, fetches Wikimedia context
+- `includeSpaceWeather` (v0.4): boolean, fetches NOAA SWPC space weather
 
-A request without the optional rich fields keeps `methodVersion: "score-v1"`, the existing core response fields, and the existing score-v1 formula. A request with `moodProfile` or `includePlaceContext` uses `methodVersion: "score-v3"` and returns rich metadata such as `derivedMoodProfile`, `rankedLocations[].v3`, `placeContextList`, and `scoreV3Weights`.
+A request without any optional fields keeps `methodVersion: "score-v1"`. With `moodProfile` or `includePlaceContext`, it uses `score-v3`. With `includeSpaceWeather: true`, it uses `score-v4`.
 
-The browser UI has four mood sliders, each defaulting to 5. It sends `moodScore` equal to the energy slider for compatibility, sends the full `moodProfile`, and provides an opt-in Wikimedia context checkbox.
+The browser UI has four mood sliders, a place-context checkbox, and a space-weather checkbox.
 
 ## Scoring
 
-The score-v1 path uses:
+### score-v1
 
-- `weatherActivation`: bounded 0 to 10 signal from temperature comfort, daylight, wind, cloud cover, and precipitation
-- `moodWeatherMismatch`: `round(abs(moodScore - weatherActivation) * 10)`
-- `elementWeatherAlignment`: bounded 0 to 100 signal from sky elements and observable weather
-- `reflectionWindowQuality`: bounded 0 to 100 quality of the best one-hour slot
 - `astroWeatherFitScore`: `round(0.45 * element + 0.35 * (100 - mismatch) + 0.20 * window)`
 
-The score-v3 path keeps the score-v1 result as its base and adds bounded mood and place components. Baseline weights are base 0.70, mood 0.20, and place 0.10 when both components are active. Active weights adjust when only one optional component is active. These weights are design heuristics, not scientific or predictive conclusions.
+### score-v3
 
-Wikimedia tags use a closed taxonomy: `coastal`, `urban_dense`, `historic`, `green_space`, `creative`, `quiet`, `nightlife`, and `transit_hub`. Tags are inferred from bounded title, description, and extract text. They are heuristic context, not factual classifications.
+- base 0.70, mood 0.20, place 0.10 (when both active)
+
+### score-v4 (NEW)
+
+- When NOAA SWPC succeeds: base 0.55, mood 0.18, place 0.10, spaceWeather 0.17
+- When NOAA SWPC unavailable: base 0.65, mood 0.22, place 0.13, spaceWeather 0 (renormalized)
+- Space weather is global: all cities share the same spaceWeatherFit value
 
 ## MCP tools
 
-The server exposes exactly eight tools:
+The server exposes exactly nine tools:
 
 1. `get_western_sky_profile` returns a geocentric tropical Western sky snapshot.
 2. `get_location_weather` returns current conditions, 24 hourly records, sunrise, and sunset.
 3. `compare_astro_weather_locations` ranks candidate cities and returns windows and explanations.
-4. `get_agent_test_fixture` returns fixed inputs, expected fields, invariants, and the eight-tool set.
+4. `get_agent_test_fixture` returns fixed inputs, expected fields, invariants, and the nine-tool set.
 5. `explain_score_components` explains a selected candidate's weighted score.
 6. `find_reflection_window` returns the strongest one-hour and three-hour windows for one City.
 7. `generate_agent_brief` returns a compact downstream-agent handoff.
 8. `get_place_context` returns Wikimedia place context directly to an agent.
+9. `get_space_weather_context` returns global NOAA SWPC space weather data directly to an agent.
 
 See `public/agents-guide.md` for request examples and response fields.
 
 ## Core file set
 
-The runtime implementation and documentation set contains 14 core files:
+The runtime implementation and documentation set contains 15 core files:
 
 1. `package.json`
 2. `wrangler.jsonc`
@@ -104,16 +102,16 @@ The runtime implementation and documentation set contains 14 core files:
 4. `src/astro.ts`
 5. `src/weather.ts`
 6. `src/scoring.ts`
-7. `src/mcp.ts`
-8. `src/place.ts`
-9. `public/index.html`
-10. `public/styles.css`
-11. `public/app.js`
-12. `public/agents-guide.md`
-13. `README.md`
-14. `test-plan.md`
-
-The repository also contains a pre-existing `test_connection_check.txt` file. It is not part of the runtime contract and is intentionally unchanged by the v0.3 UI and documentation update.
+7. `src/scoring-v4.ts`
+8. `src/mcp.ts`
+9. `src/place.ts`
+10. `src/spaceweather.ts`
+11. `public/index.html`
+12. `public/styles.css`
+13. `public/app.js`
+14. `public/agents-guide.md`
+15. `README.md`
+16. `test-plan.md`
 
 ## Local development
 
@@ -122,7 +120,7 @@ npm install
 npx wrangler dev
 ```
 
-For local development, provide the Worker secret through an uncommitted `.dev.vars` file or the normal Wrangler secret workflow:
+For local development, provide the Worker secret through an uncommitted `.dev.vars` file:
 
 ```text
 FREE_ASTROLOGY_API_KEY=your_key_here
@@ -132,19 +130,17 @@ Never commit `.dev.vars` or a real key.
 
 ## Deployment
 
-1. Connect the repository to a Cloudflare Worker through the Cloudflare Dashboard, or authenticate Wrangler locally.
+1. Connect the repository to a Cloudflare Worker through the Cloudflare Dashboard.
 2. Set `FREE_ASTROLOGY_API_KEY` as a Worker secret.
-3. Run `npx wrangler deploy` when deploying manually.
-4. Verify `GET /healthz`, the static UI, `/agents-guide.md`, the REST comparison, and the MCP endpoint.
-
-The v0.3 test sequence and stop conditions are in `test-plan.md`.
+3. NOAA SWPC endpoints are keyless and public; no additional secrets needed.
+4. Run `npx wrangler deploy` when deploying manually.
+5. Verify `GET /healthz`, the static UI, `/agents-guide.md`, the REST comparison, and the MCP endpoint.
 
 ## Security
 
 - `FREE_ASTROLOGY_API_KEY` is used only server-side by the Worker.
 - The browser calls only same-origin `/api/compare`.
-- No provider key is included in public assets, response bodies, or response headers.
-- Upstream errors are sanitized and raw upstream bodies are not returned.
+- NOAA SWPC endpoints are keyless and public.
 - No LLM is used in the scoring path.
 
 ## Limitations
@@ -152,8 +148,8 @@ The v0.3 test sequence and stop conditions are in `test-plan.md`.
 - Weather and rankings are dynamic and can change between requests.
 - The geocentric sky profile is shared across candidate cities in one comparison.
 - Wikimedia summaries can be incomplete or unavailable.
-- Scoring weights and tag mappings are explicit heuristics.
-- The tool does not provide medical, financial, legal, or predictive advice.
+- NOAA SWPC data is global, not per-city.
+- Scoring weights are heuristics and should not be treated as scientific conclusions.
 
 ## Disclaimer
 
