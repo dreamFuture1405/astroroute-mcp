@@ -43,9 +43,15 @@
           </div>
         </fieldset>
 
-        <div class="checkbox-label">
-          <input type="checkbox" id="includePlaceContext">
-          <label for="includePlaceContext">Include Wikimedia place context (opt-in, loaded only when checked)</label>
+        <div class="checkbox-group">
+          <div class="checkbox-label">
+            <input type="checkbox" id="includePlaceContext">
+            <label for="includePlaceContext">Include Wikimedia place context (opt-in, loaded only when checked)</label>
+          </div>
+          <div class="checkbox-label">
+            <input type="checkbox" id="includeSpaceWeather">
+            <label for="includeSpaceWeather">Include space weather (NOAA SWPC, global geomagnetic + solar activity)</label>
+          </div>
         </div>
 
         <fieldset class="candidates-fieldset">
@@ -66,6 +72,11 @@
     <section class="place-context-section" id="place-context-section" hidden>
       <h2>Place context</h2>
       <div id="place-context-content"></div>
+    </section>
+
+    <section class="space-weather-section" id="space-weather-section" hidden>
+      <h2>Space weather</h2>
+      <div id="space-weather-content"></div>
     </section>
 
     <section class="disclaimer-section">
