@@ -9,7 +9,8 @@
 // CORS is open for any origin. Browser only calls same-origin /api/compare.
 // v0.3: /api/compare routes through compareLocationsV3, which falls back
 // to the score-v1 path when v0.3 fields (moodProfile, includePlaceContext) are absent.
-// /healthz reports score-v1-or-score-v3 plus the new version string.
+// v0.4: /api/compare also routes through compareLocationsV4 when includeSpaceWeather=true.
+// /healthz reports score-v1-or-score-v3-or-score-v4 plus the new version string.
 
 import { createAstroRouteMcpServer } from "./mcp";
 import {
@@ -18,6 +19,10 @@ import {
   validateCompareInputV3,
   compareLocationsV3,
 } from "./scoring";
+import {
+  validateCompareInputV4,
+  compareLocationsV4,
+} from "./scoring-v4";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
 export interface Env {
@@ -74,7 +79,7 @@ export default {
     // Health check (no provider calls).
     if (url.pathname === "/healthz") {
       return jsonResponse(
-        { status: "ok", service: "astroroute", scoring: "score-v1-or-score-v3", version: "0.3.0" },
+        { status: "ok", service: "astroroute", scoring: "score-v1-or-score-v3-or-score-v4", version: "0.4.0", tools: 9 },
         200
       );
     }
@@ -97,6 +102,26 @@ export default {
           400
         );
       }
+
+      // v0.4: check if includeSpaceWeather is present → route to v4
+      const v4Validation = validateCompareInputV4(body);
+      if (v4Validation.ok && v4Validation.value.includeSpaceWeather === true) {
+        try {
+          const result = await compareLocationsV4(env, v4Validation.value);
+          return jsonResponse({ ok: true, ...result }, 200);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Unknown error";
+          return jsonResponse(
+            {
+              ok: false,
+              error: { code: "internal_error", message: "Provider or internal error.", retryable: true },
+            },
+            502
+          );
+        }
+      }
+
+      // v0.3 path (unchanged)
       const v3Validation = validateCompareInputV3(body);
       if (!v3Validation.ok) {
         return jsonResponse(
